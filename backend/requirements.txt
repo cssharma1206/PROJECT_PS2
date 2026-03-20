@@ -1,0 +1,23 @@
+# ═══════════════════════════════════════════════════════════
+# Anand Rathi - Phase 2 Backend Dependencies
+# Install: pip install -r requirements.txt
+# ═══════════════════════════════════════════════════════════
+
+# Web Framework
+fastapi==0.115.6
+uvicorn==0.34.0
+
+# Database
+pyodbc==5.2.0
+pandas==2.2.3
+
+# Authentication
+PyJWT==2.10.1
+bcrypt==4.2.1
+
+# Validation
+pydantic==2.10.4
+email-validator==2.2.0
+
+# CORS & HTTP
+python-multipart==0.0.20

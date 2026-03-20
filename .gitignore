@@ -1,0 +1,41 @@
+# ═══════════════════════════════════════════════════════
+# .gitignore for Anand Rathi Communications Intelligence
+# ═══════════════════════════════════════════════════════
+
+# ─── Folders to exclude ───────────────────────────────
+assets/
+Documentation/
+Excel Files/
+node_modules/
+old_files/
+query_logs/
+
+# ─── Python ───────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# ─── Node / React ─────────────────────────────────────
+frontend/node_modules/
+
+# ─── Environment / Secrets ────────────────────────────
+.env
+.env.local
+.env.production
+
+# ─── IDE / Editor ─────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*~
+
+# ─── OS files ─────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Logs ─────────────────────────────────────────────
+*.log
