@@ -31,7 +31,7 @@ def get_connection_string():
 # ═══════════════════════════════════════════════════════════════
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "anand_rathi_phase2_secret_2026")
 JWT_ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 15
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
 REFRESH_TOKEN_EXPIRE_DAYS = 7
 
 

@@ -1,22 +1,118 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { queryAPI } from '../services/api';
 import { useAuth } from '../context/AuthContext';
-import { Send, Database, Clock, Download, AlertCircle, Loader } from 'lucide-react';
+import { Send, Database, Clock, Download, AlertCircle, Loader, Trash2, ChevronDown, Server } from 'lucide-react';
+
+const STORAGE_KEY = 'query_chat_messages';
+const DB_KEY = 'query_selected_db';
+const TABLE_KEY = 'query_selected_table';
 
 export default function QueryPage() {
   const { user } = useAuth();
-  const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const chatEndRef = useRef(null);
 
-  const suggestions = [
-    'Show status summary',
-    'How many emails failed this week?',
-    'Show vendor ranking by failures',
-    'Show emails sent by portfolio@anandrathi.com',
-    'Show daily trend for last 7 days',
-    'Top 10 clients by email volume',
-  ];
+  // Database & table state
+  const [databases, setDatabases] = useState([]);
+  const [tables, setTables] = useState([]);
+  const [selectedDb, setSelectedDb] = useState(() => sessionStorage.getItem(DB_KEY) || '');
+  const [selectedTable, setSelectedTable] = useState(() => sessionStorage.getItem(TABLE_KEY) || '');
+
+  // Chat messages
+  const [messages, setMessages] = useState(() => {
+    try {
+      const saved = sessionStorage.getItem(STORAGE_KEY);
+      return saved ? JSON.parse(saved) : [];
+    } catch { return []; }
+  });
+
+  // Save messages
+  useEffect(() => {
+    try { sessionStorage.setItem(STORAGE_KEY, JSON.stringify(messages)); } catch {}
+  }, [messages]);
+
+  // Fetch databases on mount
+  useEffect(() => {
+    queryAPI.databases().then((res) => {
+      setDatabases(res.data.databases);
+      if (!selectedDb) {
+        setSelectedDb(res.data.default);
+        sessionStorage.setItem(DB_KEY, res.data.default);
+      }
+    }).catch(() => {
+      setDatabases([{ database: 'anandrathi', label: 'Communications', description: '' }]);
+      if (!selectedDb) setSelectedDb('anandrathi');
+    });
+  }, []);
+
+  // Fetch tables when database changes
+  useEffect(() => {
+    if (!selectedDb) return;
+    queryAPI.tables(selectedDb).then((res) => {
+      setTables(res.data.tables);
+      // Auto-select default table for this database
+      const currentTableExists = res.data.tables.some(t => t.table_name === selectedTable);
+      if (!currentTableExists) {
+        setSelectedTable(res.data.default);
+        sessionStorage.setItem(TABLE_KEY, res.data.default);
+      }
+    }).catch(() => {
+      setTables([]);
+    });
+  }, [selectedDb]);
+
+  // Auto-scroll
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, loading]);
+
+  // Dynamic suggestions based on selected database
+  const getSuggestions = () => {
+    const dbLabel = databases.find(d => d.database === selectedDb)?.label || '';
+    const tblLabel = tables.find(t => t.table_name === selectedTable)?.label || '';
+
+    if (selectedDb === 'anandrathi_trading') {
+      return [
+        'Which stock was traded most?',
+        'Show cancelled trades',
+        'Top clients by trade value',
+        'How many trades on NSE vs BSE?',
+        'Total buy value this month',
+        'Show trades above 1 lakh',
+        'Which broker handles most trades?',
+        'Show pending trades',
+      ];
+    } else if (selectedTable === 'QueryLog') {
+      return ['Show last 20 queries', 'How many queries were successful', 'Which method is used most', 'Show failed queries'];
+    } else if (selectedTable === 'ErrorLog') {
+      return ['Show recent errors', 'How many errors today', 'Most common error types', 'Errors in the last 7 days'];
+    }
+    return [
+      'Show status summary', 'How many emails failed?', 'Show vendor ranking by failures',
+      'What percentage of emails failed', 'Show daily trend for last 7 days',
+      'How many emails have null in BccData', 'Show emails submitted on weekends',
+      'Top 10 clients by email volume',
+    ];
+  };
+
+  const handleDbChange = (e) => {
+    const newDb = e.target.value;
+    setSelectedDb(newDb);
+    sessionStorage.setItem(DB_KEY, newDb);
+    // Clear chat and table selection when switching databases
+    setMessages([]);
+    sessionStorage.removeItem(STORAGE_KEY);
+    setSelectedTable(''); // Will be auto-set by the useEffect above
+  };
+
+  const handleTableChange = (e) => {
+    const newTable = e.target.value;
+    setSelectedTable(newTable);
+    sessionStorage.setItem(TABLE_KEY, newTable);
+    setMessages([]);
+    sessionStorage.removeItem(STORAGE_KEY);
+  };
 
   const handleSend = async (question) => {
     const q = question || input.trim();
@@ -28,32 +124,25 @@ export default function QueryPage() {
     setLoading(true);
 
     try {
-      const res = await queryAPI.ask(q);
+      const res = await queryAPI.ask(q, selectedTable, selectedDb);
       const data = res.data;
-      const aiMsg = {
-        role: 'assistant',
-        content: data,
-        timestamp: new Date().toLocaleTimeString(),
-      };
-      setMessages((prev) => [...prev, aiMsg]);
+      setMessages((prev) => [...prev, { role: 'assistant', content: data, timestamp: new Date().toLocaleTimeString() }]);
     } catch (err) {
-      const errMsg = {
+      setMessages((prev) => [...prev, {
         role: 'assistant',
-        content: { error: err.response?.data?.detail || 'Query failed. The Query API will be fully connected when MCP is built on Day 9-14. For now, Dashboard APIs are working!' },
+        content: { error: err.response?.data?.detail || 'Query failed. Check if backend and Ollama are running.' },
         timestamp: new Date().toLocaleTimeString(),
-      };
-      setMessages((prev) => [...prev, errMsg]);
+      }]);
     } finally {
       setLoading(false);
     }
   };
 
   const handleKeyDown = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
   };
+
+  const clearChat = () => { setMessages([]); sessionStorage.removeItem(STORAGE_KEY); };
 
   const exportCSV = (data, columns) => {
     if (!data || !columns) return;
@@ -63,32 +152,81 @@ export default function QueryPage() {
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url;
-    a.download = 'query_results.csv';
-    a.click();
+    a.href = url; a.download = 'query_results.csv'; a.click();
   };
+
+  const currentDbLabel = databases.find(d => d.database === selectedDb)?.label || selectedDb;
+  const currentTableLabel = tables.find(t => t.table_name === selectedTable)?.label || selectedTable;
+  const isDefaultDb = selectedDb === 'anandrathi';
+  const isDefaultTable = selectedTable === 'CommunicationsRequestStatus';
 
   return (
     <div style={s.container}>
+      {/* Header */}
       <div style={s.header}>
         <h1 style={s.title}>Query Engine</h1>
         <div style={s.badge}>
-          {user?.role_name === 'Admin' ? 'Full access' : `Filtered by role`}
+          {user?.role_name === 'Admin' ? 'Full access' : 'Filtered by role'}
         </div>
+
+        {/* Database Selector */}
+        {databases.length > 1 && (
+          <div style={s.selector}>
+            <Server size={14} color="#5A6577" />
+            <select style={s.dropdown} value={selectedDb} onChange={handleDbChange}>
+              {databases.map((d) => (
+                <option key={d.database} value={d.database}>{d.label}</option>
+              ))}
+            </select>
+            <ChevronDown size={14} color="#5A6577" style={{ pointerEvents: 'none', marginLeft: -24 }} />
+          </div>
+        )}
+
+        {/* Table Selector */}
+        {tables.length > 1 && (
+          <div style={s.selector}>
+            <Database size={14} color="#5A6577" />
+            <select style={s.dropdown} value={selectedTable} onChange={handleTableChange}>
+              {tables.map((t) => (
+                <option key={t.table_name} value={t.table_name}>{t.label}</option>
+              ))}
+            </select>
+            <ChevronDown size={14} color="#5A6577" style={{ pointerEvents: 'none', marginLeft: -24 }} />
+          </div>
+        )}
+
+        {messages.length > 0 && (
+          <button style={s.clearBtn} onClick={clearChat} title="Clear chat">
+            <Trash2 size={14} /><span>Clear</span>
+          </button>
+        )}
       </div>
 
-      {/* Chat Messages */}
+      {/* Context banner */}
+      {(!isDefaultDb || !isDefaultTable) && (
+        <div style={s.contextBanner}>
+          <Server size={14} />
+          <span>
+            Querying: <strong>{currentDbLabel}</strong>
+            {tables.length > 1 && <> → <strong>{currentTableLabel}</strong></>}
+          </span>
+        </div>
+      )}
+
+      {/* Chat Area */}
       <div style={s.chatArea}>
         {messages.length === 0 && (
           <div style={s.emptyState}>
             <Database size={40} color="#D0D5DD" />
             <h3 style={s.emptyTitle}>Ask your data anything</h3>
-            <p style={s.emptyText}>Type a question in natural language and the AI will generate SQL and fetch results.</p>
+            <p style={s.emptyText}>
+              {isDefaultDb
+                ? 'Type a question in natural language and the AI will generate SQL and fetch results.'
+                : `You are querying the ${currentDbLabel} database. Ask any question about this data.`}
+            </p>
             <div style={s.suggestGrid}>
-              {suggestions.map((sg) => (
-                <button key={sg} style={s.suggestBtn} onClick={() => handleSend(sg)}>
-                  {sg}
-                </button>
+              {getSuggestions().map((sg) => (
+                <button key={sg} style={s.suggestBtn} onClick={() => handleSend(sg)}>{sg}</button>
               ))}
             </div>
           </div>
@@ -100,60 +238,41 @@ export default function QueryPage() {
               {msg.role === 'user' ? (
                 <p style={s.msgText}>{msg.content}</p>
               ) : msg.content.error ? (
-                <div style={s.errorBox}>
-                  <AlertCircle size={16} />
-                  <span>{msg.content.error}</span>
-                </div>
+                <div style={s.errorBox}><AlertCircle size={16} /><span>{msg.content.error}</span></div>
               ) : (
                 <div>
-                  {/* SQL Preview */}
                   {msg.content.generated_sql && (
                     <div style={s.sqlBox}>
                       <div style={s.sqlHeader}>
-                        <Database size={14} />
-                        <span>Generated SQL</span>
+                        <Database size={14} /><span>Generated SQL</span>
                         <span style={s.methodBadge}>{msg.content.method}</span>
                       </div>
                       <pre style={s.sqlCode}>{msg.content.generated_sql}</pre>
                     </div>
                   )}
-
-                  {/* Result Info */}
                   <div style={s.resultInfo}>
                     <span>{msg.content.row_count} rows returned</span>
                     {msg.content.execution_time_ms && (
                       <span style={s.timeInfo}><Clock size={12} /> {msg.content.execution_time_ms}ms</span>
                     )}
                   </div>
-
-                  {/* Data Table */}
                   {msg.content.data && msg.content.data.length > 0 && (
                     <div style={s.tableWrap}>
                       <table style={s.table}>
-                        <thead>
-                          <tr>
-                            {msg.content.columns.map((col) => (
-                              <th key={col} style={s.th}>{col}</th>
-                            ))}
-                          </tr>
-                        </thead>
+                        <thead><tr>
+                          {msg.content.columns.map((col) => <th key={col} style={s.th}>{col}</th>)}
+                        </tr></thead>
                         <tbody>
                           {msg.content.data.slice(0, 20).map((row, ri) => (
                             <tr key={ri}>
-                              {msg.content.columns.map((col) => (
-                                <td key={col} style={s.td}>{row[col] ?? '-'}</td>
-                              ))}
+                              {msg.content.columns.map((col) => <td key={col} style={s.td}>{row[col] ?? '-'}</td>)}
                             </tr>
                           ))}
                         </tbody>
                       </table>
-                      {msg.content.data.length > 20 && (
-                        <p style={s.moreRows}>...and {msg.content.data.length - 20} more rows</p>
-                      )}
+                      {msg.content.data.length > 20 && <p style={s.moreRows}>...and {msg.content.data.length - 20} more rows</p>}
                     </div>
                   )}
-
-                  {/* Export Button */}
                   {msg.content.data && msg.content.data.length > 0 && (
                     <button style={s.exportBtn} onClick={() => exportCSV(msg.content.data, msg.content.columns)}>
                       <Download size={14} /> Export CSV
@@ -173,16 +292,17 @@ export default function QueryPage() {
             </div>
           </div>
         )}
+        <div ref={chatEndRef} />
       </div>
 
-      {/* Input Bar */}
+      {/* Input */}
       <div style={s.inputBar}>
         <input
           style={s.input}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Ask a question about your data..."
+          placeholder={`Ask about ${currentDbLabel}${!isDefaultTable ? ' → ' + currentTableLabel : ''}...`}
           disabled={loading}
         />
         <button style={s.sendBtn} onClick={() => handleSend()} disabled={loading || !input.trim()}>
@@ -195,9 +315,13 @@ export default function QueryPage() {
 
 const s = {
   container: { display: 'flex', flexDirection: 'column', height: 'calc(100vh - 56px)' },
-  header: { display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 },
+  header: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8, flexWrap: 'wrap' },
   title: { fontSize: 24, fontWeight: 700, color: '#0F2744', margin: 0 },
   badge: { fontSize: 12, fontWeight: 500, padding: '4px 12px', borderRadius: 20, background: '#EEF2F7', color: '#5A6577' },
+  selector: { display: 'flex', alignItems: 'center', gap: 6, padding: '4px 12px', borderRadius: 8, border: '1px solid #E8ECF0', background: '#FFF', position: 'relative' },
+  dropdown: { appearance: 'none', border: 'none', background: 'transparent', fontSize: 13, fontWeight: 500, color: '#0F2744', cursor: 'pointer', paddingRight: 20, outline: 'none', fontFamily: 'inherit' },
+  clearBtn: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, padding: '6px 14px', borderRadius: 8, border: '1px solid #E8ECF0', background: '#FFF', fontSize: 12, fontWeight: 500, color: '#8B94A6', cursor: 'pointer', fontFamily: 'inherit' },
+  contextBanner: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#5A6577', background: '#F0F7FF', border: '1px solid #D0E2F4', padding: '8px 14px', borderRadius: 8, marginBottom: 10 },
   chatArea: { flex: 1, overflowY: 'auto', paddingBottom: 16 },
   emptyState: { textAlign: 'center', padding: '60px 20px' },
   emptyTitle: { fontSize: 18, fontWeight: 600, color: '#0F2744', margin: '16px 0 6px' },

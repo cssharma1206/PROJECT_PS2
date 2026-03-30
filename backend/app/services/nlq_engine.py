@@ -1,24 +1,25 @@
 """
-NLQ Engine v2.0 - Natural Language Query Engine
+NLQ Engine v2.1 - Natural Language Query Engine
 ================================================
 The brain of the Communications Intelligence Platform.
 
+AI-FIRST Architecture (Day 10 update):
+  - Templates exist ONLY as a speed cache for common queries (~5ms)
+  - Any question templates can't handle → falls through to MCP/AI
+  - MCP Bridge calls Ollama to generate SQL from natural language
+  - The AI reads live schema and generates correct SQL for ANY question
+
 Flow:
   1. User asks a question in natural language
-  2. Try template matching first (instant, no AI needed)
-  3. If no template match → read schema LIVE from INFORMATION_SCHEMA
-  4. Convert schema to simple text description
-  5. Send schema + question to Ollama (localhost:11434)
-  6. Validate the generated SQL (safety checks)
-  7. Inject access control WHERE clause
-  8. Execute SQL on the database
-  9. Return data + metadata to frontend
+  2. (Optional) Check template cache — instant response if matched
+  3. If no match → return None → query.py routes to MCP Bridge
+  4. MCP Bridge → mcp_server.py → Ollama AI → SQL generation
+  5. Access control is always injected (guaranteed data isolation)
 
-Key decisions:
-  - Schema is read LIVE from DB (supervisor requirement)
-  - Schema sent as plain text (proven reliable with Qwen 2.5:3B)
-  - TOON format as optional enhancement (mentor suggestion)
-  - Templates handle ~70% of queries, AI handles the rest
+Key principle:
+  Templates are a PERFORMANCE OPTIMIZATION, not the brain.
+  The AI (Ollama via MCP) is the brain. It handles everything.
+  If you delete all templates, the system still works — just slower.
 """
 
 import re
@@ -141,18 +142,40 @@ def get_sample_values() -> str:
 
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 2: TEMPLATE MATCHING (22 templates from Phase 1)
+# STEP 2: TEMPLATE SPEED CACHE
+# ═══════════════════════════════════════════════════════════════
+# These templates are a PERFORMANCE OPTIMIZATION only.
+# They handle common queries in ~5ms instead of ~60s.
+# If a question doesn't match any template, it returns (None, None)
+# and the query router sends it to MCP/AI — which can handle
+# ANY question in natural language.
+#
+# Rule: If a template can't handle a question PERFECTLY,
+#       return (None, None) and let AI handle it.
+#       Never return a wrong or incomplete query from a template.
 # ═══════════════════════════════════════════════════════════════
 
 def match_template(question: str, access_filter: str) -> Tuple[Optional[str], Optional[str]]:
     """
-    Try to match the question to a pre-defined SQL template.
+    Speed cache — try to match common questions to pre-built SQL.
     Returns (sql, description) if matched, (None, None) if not.
 
-    These 22 templates handle ~70% of common queries INSTANTLY
-    without needing any AI call.
+    If (None, None) is returned, the query router will send the
+    question to MCP Bridge → Ollama AI, which can handle anything.
     """
     q = question.lower().strip()
+
+    # ─── EARLY EXIT: Questions that need AI intelligence ──
+    # If the question mentions these, templates can't handle it
+    # properly. Let AI do it.
+    ai_keywords = ['null', 'not null', 'empty', 'blank', 'missing',
+                   'between', 'compare', 'percentage', 'average',
+                   'median', 'ratio', 'correlat', 'predict',
+                   'weekend', 'weekday', 'month', 'year',
+                   'oldest', 'newest', 'first', 'last record',
+                   'duplicate', 'distinct count', 'group by']
+    if any(kw in q for kw in ai_keywords):
+        return None, None  # → MCP/AI will handle this
 
     # Extract numbers from question (for days, limits etc.)
     num_match = re.search(r'(\d+)', q)
@@ -240,11 +263,11 @@ def match_template(question: str, access_filter: str) -> Tuple[Optional[str], Op
         return sql, f"Successful emails (last {days} days)"
 
     # T15: Peak hours
-    if any(w in q for w in ['hour', 'time of day', 'peak', 'when']):
+    if any(w in q for w in ['hour', 'time of day', 'peak']):
         sql = f"SELECT DATEPART(hour, SubmitDate) AS Hour, COUNT(*) AS Count FROM CommunicationsRequestStatus {wf} GROUP BY DATEPART(hour, SubmitDate) ORDER BY Hour"
         return sql, "Email volume by hour"
 
-    # T16: Count queries
+    # T16: Simple count queries (only for clear status-based counts)
     if any(w in q for w in ['how many', 'count', 'total number']):
         if 'fail' in q:
             sql = f"SELECT COUNT(*) AS Total FROM CommunicationsRequestStatus WHERE LastStatus='FAILED' {af}"
@@ -255,9 +278,13 @@ def match_template(question: str, access_filter: str) -> Tuple[Optional[str], Op
         elif 'pending' in q:
             sql = f"SELECT COUNT(*) AS Total FROM CommunicationsRequestStatus WHERE LastStatus='PENDING' {af}"
             return sql, "Count of pending emails"
-        else:
+        elif 'total' in q or 'all' in q:
             sql = f"SELECT COUNT(*) AS Total FROM CommunicationsRequestStatus {wf}"
             return sql, "Total email count"
+        else:
+            # Question asks "how many" but with specific conditions
+            # we can't handle → let AI figure it out
+            return None, None
 
     # T17: Unique clients
     if any(w in q for w in ['unique', 'distinct']) and any(w in q for w in ['receiver', 'client']):
@@ -278,13 +305,16 @@ def match_template(question: str, access_filter: str) -> Tuple[Optional[str], Op
         sql = f"SELECT TOP 50 Id, Sender, LastStatus, FORMAT(SubmitDate,'dd-MMM-yyyy') AS Date FROM CommunicationsRequestStatus WHERE Receiver = '{receiver}' {af} ORDER BY SubmitDate DESC"
         return sql, f"Emails for {receiver}"
 
-    # No match
+    # ─── No match → MCP/AI will handle it ─────────────────
     return None, None
 
 
 # ═══════════════════════════════════════════════════════════════
 # STEP 3: AI FALLBACK (Ollama with live schema)
 # ═══════════════════════════════════════════════════════════════
+# NOTE: This function is kept for backward compatibility.
+# The primary AI path now goes through MCP Bridge (mcp_client.py).
+# This is only used if process_query() is called directly.
 
 def generate_sql_with_ai(question: str, access_filter: str) -> Optional[str]:
     """
@@ -492,18 +522,14 @@ def execute_query_safe(sql: str) -> Tuple[List[Dict], List[str], Optional[str]]:
 # ═══════════════════════════════════════════════════════════════
 # MAIN FUNCTION: Process Natural Language Query
 # ═══════════════════════════════════════════════════════════════
+# NOTE: This function is kept for backward compatibility.
+# The primary query path now goes through query.py → MCP Bridge.
+# This is only used as a fallback if MCP is unavailable.
 
 def process_query(question: str, user: dict) -> dict:
     """
-    Main entry point — processes a natural language question end-to-end.
-
-    Args:
-        question: The user's question in plain English
-        user: JWT payload with role, application_id, etc.
-
-    Returns:
-        dict with: question, generated_sql, method, data, columns,
-                   row_count, execution_time_ms, insights, error
+    Legacy entry point — processes a question using templates + direct Ollama.
+    The primary path (query.py) uses MCP Bridge instead.
     """
     start_time = time.time()
 
