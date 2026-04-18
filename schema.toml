@@ -2,6 +2,7 @@
 # ANAND RATHI - DATABASE SCHEMA (TOML Format)
 # For AI/MCP consumption - reduces token usage
 # Database: anandrathi on GLADIATOR\SQLEXPRESS
+# Updated: 2026-04-18 — new 4-table schema
 # ═══════════════════════════════════════════════════════════
 
 [database]
@@ -9,37 +10,71 @@ name = "anandrathi"
 server = "GLADIATOR\\SQLEXPRESS"
 type = "mssql"
 
-# ─── MAIN DATA TABLE (Query Target) ──────────────────────
-[tables.CommunicationsRequestStatus]
-description = "Email/SMS communication records for Anand Rathi clients. 1000 rows."
+# ─── APPLICATION MASTER ──────────────────────────────────
+[tables.ApplicationMaster]
+description = "Registered applications (APP001, APP002). Each business unit has one application."
+primary_key = "AppId"
+row_count = 2
+
+[tables.ApplicationMaster.columns]
+AppId = { type = "int", description = "Unique application ID", example = "1, 2" }
+ApplicationCode = { type = "nvarchar", description = "Short code for the application", example = "APP001, APP002", alias = ["app code", "code", "application code"] }
+ApplicationName = { type = "nvarchar", description = "Display name of the application", example = "Application One", alias = ["app name", "name"] }
+CreatedBy = { type = "int", description = "User ID who created this application" }
+CreatedAt = { type = "datetime", description = "When the application was registered" }
+IsActive = { type = "bit", description = "Whether the application is active (1) or disabled (0)" }
+
+# ─── COMMUNICATION MASTER (Primary query target) ────────
+[tables.CommunicationMaster]
+description = "Email and SMS communications sent to clients. Links to ApplicationMaster via ApplicationId."
+primary_key = "ComID"
+row_count = 4000
+
+[tables.CommunicationMaster.columns]
+ComID = { type = "int", description = "Unique communication ID", example = "1, 2, 3", alias = ["id", "com id"] }
+ServiceType = { type = "nvarchar", description = "Channel used to send", example = "SMS, EMAIL", alias = ["channel", "type", "service"] }
+ApplicationId = { type = "int", description = "Which application sent this communication. Links to ApplicationMaster.AppId", alias = ["app id", "application"] }
+Message = { type = "nvarchar", description = "The actual message body sent to the client", alias = ["body", "content", "text"] }
+SentTo = { type = "nvarchar", description = "Recipient (phone number for SMS, email for EMAIL)", example = "+916804107982, client@yahoo.com", alias = ["to", "recipient", "receiver"] }
+SentBy = { type = "int", description = "User ID who sent the communication. Links to Users_v2.user_id" }
+CreatedAt = { type = "datetime", description = "When the communication was sent", alias = ["date", "sent date", "when"] }
+Status = { type = "nvarchar", description = "Delivery status", example = "SUCCESS, FAILED, BOUNCE, DROPPED, DUPLICATE", alias = ["status", "delivery status"] }
+
+[tables.CommunicationMaster.access_control]
+field = "ApplicationId"
+note = "Non-admin users filter by AppIds from their ApplicationAccessMaster entries"
+
+# ─── COMMUNICATION ERROR MASTER ─────────────────────────
+[tables.CommunicationErrorMaster]
+description = "Error details for failed communications. One row per FAILED communication with a reason."
+primary_key = "ComErrorId"
+row_count = 664
+
+[tables.CommunicationErrorMaster.columns]
+ComErrorId = { type = "int", description = "Unique error record ID" }
+ComParentId = { type = "int", description = "Links to CommunicationMaster.ComID (the failed communication)", alias = ["parent id", "communication id"] }
+AppId = { type = "int", description = "Which application this failure belongs to. Links to ApplicationMaster.AppId" }
+ErrorSummary = { type = "nvarchar", description = "Why the communication failed", example = "Network Error, Template not matched, Invalid User, Out of Network", alias = ["error", "reason", "failure reason"] }
+CreatedAt = { type = "datetime", description = "When the error was recorded" }
+
+# ─── APPLICATION ACCESS MASTER (Authorization) ──────────
+[tables.ApplicationAccessMaster]
+description = "Maps users to applications they can access. Admins are NOT in this table (they bypass)."
 primary_key = "Id"
-row_count = 1000
 
-[tables.CommunicationsRequestStatus.columns]
-Id = { type = "int", description = "Unique record ID", example = "2006" }
-ReferenceVendorId = { type = "int", description = "Email service provider ID", example = "1, 7, 15, 30", alias = ["vendor", "vendor id", "provider"] }
-ReferenceApplicationId = { type = "int", description = "Team assignment for access control", example = "10, 15, 20", alias = ["team", "application", "app id"] }
-Receiver = { type = "nvarchar", description = "Client email address (recipient)", example = "client1@gmail.com", alias = ["to", "recipient", "client email", "sent to"] }
-Sender = { type = "nvarchar", description = "Anand Rathi sender email", example = "trading@anandrathi.com", alias = ["from", "sender email", "sent by"] }
-CCData = { type = "nvarchar", description = "CC email addresses", example = "compliance@anandrathi.com", alias = ["cc", "copy"] }
-BccData = { type = "nvarchar", description = "BCC email addresses", alias = ["bcc", "blind copy"] }
-SubmitDate = { type = "datetime", description = "When email was submitted", example = "2026-01-15 10:30:00", alias = ["date", "sent date", "when", "submit date"] }
-LastStatus = { type = "nvarchar", description = "Current status of email", example = "SENT, FAILED, PENDING, CREATED, SUBMITTED, DELIVERED", alias = ["status", "email status"] }
-AttachmentInfo = { type = "nvarchar", description = "Attachment filename", example = "account_opening_form.pdf", alias = ["attachment", "document", "file"] }
-CategoryId = { type = "int", description = "Category identifier", example = "1-10", alias = ["category"] }
-UpdatedDate = { type = "datetime", description = "Last update timestamp", alias = ["updated", "last updated"] }
+[tables.ApplicationAccessMaster.columns]
+Id = { type = "int", description = "Unique mapping ID" }
+UserID = { type = "int", description = "Links to Users_v2.user_id" }
+AppCode = { type = "nvarchar", description = "Links to ApplicationMaster.ApplicationCode", example = "APP001, APP002" }
+CreatedAt = { type = "datetime", description = "When access was granted" }
 
-[tables.CommunicationsRequestStatus.access_control]
-field = "ReferenceApplicationId"
-note = "Non-admin users must filter by their application_id from Roles table"
-
-# ─── PLATFORM TABLES ─────────────────────────────────────
+# ─── PLATFORM TABLES (not queried by users) ─────────────
 [tables.Users_v2]
-description = "Platform users for Phase 2 authentication"
+description = "Platform users (login, roles). Not directly queried by natural language."
 primary_key = "user_id"
 
 [tables.Roles]
-description = "Role definitions with permissions and app_code mapping"
+description = "Role definitions (Admin, RM, RM_Head, etc.)"
 primary_key = "role_id"
 
 [tables.Token]
@@ -47,9 +82,13 @@ description = "JWT refresh token storage"
 primary_key = "token_id"
 
 [tables.QueryLog]
-description = "Tracks every natural language query and AI-generated SQL"
+description = "Query audit log — every NL query and generated SQL"
 primary_key = "log_id"
 
 [tables.ErrorLog]
 description = "Application error tracking"
 primary_key = "error_id"
+
+[tables.ServiceTypeLookup]
+description = "Valid ServiceType values (SMS, EMAIL)"
+primary_key = "ServiceType"

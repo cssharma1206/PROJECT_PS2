@@ -1,0 +1,42 @@
+{
+  "default_database": "anandrathi",
+  "databases": {
+    "anandrathi": {
+      "label": "Communications",
+      "description": "Email & SMS communication tracking",
+      "db_type": "sqlserver",
+      "driver": "{ODBC Driver 17 for SQL Server}",
+      "server": "GLADIATOR\\SQLEXPRESS",
+      "database": "anandrathi",
+      "trusted_connection": "yes",
+      "username": "",
+      "password": "",
+      "categories": {
+        "Communications": {
+          "description": "Communications, errors, and applications",
+          "tables": ["CommunicationMaster", "CommunicationErrorMaster", "ApplicationMaster"],
+          "default_table": "CommunicationMaster",
+          "access": "all"
+        }
+      }
+    },
+"anandrathi_trading": {
+      "label": "Trading",
+      "description": "Stock trading & portfolio management (PostgreSQL)",
+      "db_type": "postgres",
+      "host": "localhost",
+      "port": 5432,
+      "database": "anandrathi_trading",
+      "username": "postgres",
+      "password": "root",
+      "categories": {
+        "Trading": {
+          "description": "Stock trades and settlements",
+          "tables": ["tradehistory"],
+          "default_table": "tradehistory",
+          "access": "all"
+        }
+      }
+    }
+  }
+}

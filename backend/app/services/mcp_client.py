@@ -249,15 +249,31 @@ class MCPBridge:
 
             # Step 4: Execute SQL
             exec_text = execute_query(generated_sql)
-            if "SQL Error" in exec_text or "Invalid column name" in exec_text:
-                elapsed = int((time.time() - start_time) * 1000)
-                db_label = DATABASES.get(database, {}).get("label", database)
-                return self._error_response(
-                    question, elapsed,
-                    f"This question doesn't seem to match the {db_label} database. Try asking something relevant to the selected database."
-                )
-            
             data, columns = self._parse_execution_result(exec_text)
+
+            elapsed = int((time.time() - start_time) * 1000)
+
+            # Get database label for display
+            db_label = DATABASES.get(database, {}).get("label", database)
+
+            insights = []
+            if len(data) == 0:
+                insights.append("No records found matching your query.")
+            else:
+                insights.append(f"Found {len(data)} records.")
+            insights.append(f"Database: {db_label} | Table: {table_name}")
+
+            return {
+                "question": question,
+                "generated_sql": generated_sql,
+                "method": "mcp",
+                "data": data,
+                "columns": columns,
+                "row_count": len(data),
+                "execution_time_ms": elapsed,
+                "insights": insights,
+                "error": None,
+            }
 
         except Exception as e:
             elapsed = int((time.time() - start_time) * 1000)
