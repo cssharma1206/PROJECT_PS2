@@ -35,7 +35,7 @@ from app.services.error_logger import log_error
 # ═══════════════════════════════════════════════════════════════
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "gemma3:4b"
-OLLAMA_TIMEOUT = 120  # seconds
+OLLAMA_TIMEOUT = 180  # seconds
 
 
 # ═══════════════════════════════════════════════════════════════

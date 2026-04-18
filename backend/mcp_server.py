@@ -23,11 +23,19 @@ Test with: mcp dev mcp_server.py
 """
 
 import sys
+import os
 import json
 import re
 import pyodbc
 import requests
 from mcp.server.fastmcp import FastMCP
+
+# Try to import psycopg2 — only needed if a Postgres DB is configured
+try:
+    import psycopg2
+    PSYCOPG2_AVAILABLE = True
+except ImportError:
+    PSYCOPG2_AVAILABLE = False
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -37,29 +45,80 @@ from mcp.server.fastmcp import FastMCP
 mcp = FastMCP("anand-rathi-db")
 
 # ═══════════════════════════════════════════════════════════════
-# DATABASE CONFIG
+# LOAD CONFIG FROM db_config.json
 # ═══════════════════════════════════════════════════════════════
 
-DB_CONFIG = {
-    "driver": "{ODBC Driver 17 for SQL Server}",
-    "server": r"GLADIATOR\SQLEXPRESS",
-    "database": "anandrathi",
-    "trusted_connection": "yes",
-}
+CONFIG_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "db_config.json"
+)
+
+
+def _load_config() -> dict:
+    """Load the database configuration from db_config.json."""
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"WARNING: Could not load db_config.json: {e}", file=sys.stderr)
+        return {"default_database": "anandrathi", "databases": {}}
+
+
+CONFIG = _load_config()
+DEFAULT_DB_NAME = CONFIG.get("default_database", "anandrathi")
+
+# ACTIVE_DB holds the current database name being queried.
+# It's updated by the connect_database tool.
+ACTIVE_DB = DEFAULT_DB_NAME
+
+
+def _get_db_config(db_name: str = None) -> dict:
+    """Get config block for a database name. Falls back to default."""
+    name = db_name or ACTIVE_DB
+    return CONFIG.get("databases", {}).get(name, {})
+
+def _get_db_type(db_name: str = None) -> str:
+    """Return 'sqlserver' or 'postgres' for the given db (or active)."""
+    return _get_db_config(db_name).get("db_type", "sqlserver")
+
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "gemma3:4b"
-OLLAMA_TIMEOUT = 180  # increased from 120
+OLLAMA_TIMEOUT = 180
 
 
-def _get_connection():
-    """Create a database connection."""
-    return pyodbc.connect(
-        f"DRIVER={DB_CONFIG['driver']};"
-        f"SERVER={DB_CONFIG['server']};"
-        f"DATABASE={DB_CONFIG['database']};"
-        f"Trusted_Connection={DB_CONFIG['trusted_connection']};"
-    )
+def _get_connection(db_name: str = None):
+    """
+    Create a database connection based on db_type in config.
+    Supports: sqlserver (pyodbc), postgres (psycopg2).
+    """
+    cfg = _get_db_config(db_name)
+    if not cfg:
+        raise RuntimeError(f"No config found for database '{db_name or ACTIVE_DB}'")
+
+    db_type = cfg.get("db_type", "sqlserver")
+
+    if db_type == "sqlserver":
+        return pyodbc.connect(
+            f"DRIVER={cfg['driver']};"
+            f"SERVER={cfg['server']};"
+            f"DATABASE={cfg['database']};"
+            f"Trusted_Connection={cfg.get('trusted_connection', 'yes')};"
+        )
+    elif db_type == "postgres":
+        if not PSYCOPG2_AVAILABLE:
+            raise RuntimeError(
+                "psycopg2 not installed. Run: pip install psycopg2-binary"
+            )
+        return psycopg2.connect(
+            host=cfg["host"],
+            port=cfg.get("port", 5432),
+            database=cfg["database"],
+            user=cfg["username"],
+            password=cfg["password"],
+        )
+    else:
+        raise RuntimeError(f"Unsupported db_type: '{db_type}'")
 
 
 def _validate_sql(sql: str) -> tuple:
@@ -82,28 +141,28 @@ def _validate_sql(sql: str) -> tuple:
 # ═══════════════════════════════════════════════════════════════
 
 @mcp.tool()
-def connect_database(
-    server: str = r"GLADIATOR\SQLEXPRESS",
-    database: str = "anandrathi"
-) -> str:
+def connect_database(database_name: str = "") -> str:
     """
-    Connect to a SQL Server database.
-    Call this first before using other tools.
+    Switch the active database by name (as defined in db_config.json).
 
     Args:
-        server: SQL Server instance name
-        database: Database name to connect to
+        database_name: Database name from config, e.g. 'anandrathi' or 'anandrathi_trading'
     """
-    DB_CONFIG["server"] = server
-    DB_CONFIG["database"] = database
+    global ACTIVE_DB
+    name = database_name or DEFAULT_DB_NAME
+
+    cfg = CONFIG.get("databases", {}).get(name)
+    if not cfg:
+        return f"Connection FAILED: Database '{name}' not found in config"
 
     try:
-        conn = _get_connection()
+        conn = _get_connection(name)
         cursor = conn.cursor()
         cursor.execute("SELECT 1")
         cursor.close()
         conn.close()
-        return f"Connected successfully to {server} / {database}"
+        ACTIVE_DB = name
+        return f"Connected successfully to {name} ({cfg.get('db_type', 'sqlserver')})"
     except Exception as e:
         return f"Connection FAILED: {str(e)}"
 
@@ -231,6 +290,9 @@ SKIP_SAMPLE_COLUMNS = {'RequestData', 'Body', 'Subject', 'Gu_id',
 
 def _get_table_names() -> list:
     """Get all user table names from the connected database."""
+    db_type = _get_db_type()
+    schema_name = "public" if db_type == "postgres" else "dbo"
+
     try:
         conn = _get_connection()
         cursor = conn.cursor()
@@ -238,10 +300,17 @@ def _get_table_names() -> list:
             SELECT TABLE_NAME
             FROM INFORMATION_SCHEMA.TABLES
             WHERE TABLE_TYPE = 'BASE TABLE'
-              AND TABLE_SCHEMA = 'dbo'
+              AND TABLE_SCHEMA = %s
               AND TABLE_NAME NOT IN ('sysdiagrams')
             ORDER BY TABLE_NAME
-        """)
+        """ if db_type == "postgres" else """
+            SELECT TABLE_NAME
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_TYPE = 'BASE TABLE'
+              AND TABLE_SCHEMA = ?
+              AND TABLE_NAME NOT IN ('sysdiagrams')
+            ORDER BY TABLE_NAME
+        """, (schema_name,))
         tables = [r[0] for r in cursor.fetchall()]
         cursor.close()
         conn.close()
@@ -253,50 +322,75 @@ def _get_table_names() -> list:
 def _get_schema_and_samples(table_name: str) -> tuple:
     """
     Get columns AND sample values in ONE database connection.
+    Works for both SQL Server and Postgres.
     Returns (columns_list, samples_dict, total_rows).
-    This is much faster than separate calls.
     """
     columns = []
     samples = {}
     total_rows = 0
+
+    db_type = _get_db_type()
+    is_postgres = (db_type == "postgres")
+
+    # Identifier quoting: SQL Server uses [name], Postgres uses "name"
+    ql, qr = ('"', '"') if is_postgres else ('[', ']')
+    # Parameter placeholder
+    ph = "%s" if is_postgres else "?"
+    # Row-limit syntax
+    def limit_clause(n):
+        return f"LIMIT {n}" if is_postgres else f"TOP {n}"
+    # String-type names per dialect
+    string_types = ('character varying', 'text', 'varchar') if is_postgres \
+                   else ('nvarchar', 'varchar')
+    int_types = ('integer', 'smallint', 'bigint') if is_postgres \
+                else ('int', 'smallint', 'tinyint')
 
     try:
         conn = _get_connection()
         cursor = conn.cursor()
 
         # Get columns
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE
             FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_NAME = ?
+            WHERE TABLE_NAME = {ph}
             ORDER BY ORDINAL_POSITION
         """, (table_name,))
         columns = [(r[0], r[1], r[2]) for r in cursor.fetchall()]
 
         # Get total rows
-        cursor.execute(f"SELECT COUNT(*) FROM [{table_name}]")
+        cursor.execute(f"SELECT COUNT(*) FROM {ql}{table_name}{qr}")
         total_rows = cursor.fetchone()[0]
 
-        # Sample only useful columns (one query per column, skip noisy ones)
+        # Sample useful columns
         for col_name, col_type, _ in columns:
-            # Skip columns that have long/noisy values
             if col_name in SKIP_SAMPLE_COLUMNS:
                 continue
 
-            # Only sample short string columns and small int columns
-            if col_type not in ('nvarchar', 'varchar', 'int', 'smallint', 'tinyint'):
+            if col_type not in string_types and col_type not in int_types:
                 continue
 
             try:
-                cursor.execute(f"""
-                    SELECT DISTINCT TOP 10 [{col_name}]
-                    FROM [{table_name}]
-                    WHERE [{col_name}] IS NOT NULL AND CAST([{col_name}] AS NVARCHAR(100)) != ''
-                      AND LEN(CAST([{col_name}] AS NVARCHAR(MAX))) < 50
-                    ORDER BY [{col_name}]
-                """)
+                if is_postgres:
+                    sql = f"""
+                        SELECT DISTINCT {ql}{col_name}{qr}
+                        FROM {ql}{table_name}{qr}
+                        WHERE {ql}{col_name}{qr} IS NOT NULL
+                          AND CAST({ql}{col_name}{qr} AS TEXT) != ''
+                          AND LENGTH(CAST({ql}{col_name}{qr} AS TEXT)) < 50
+                        ORDER BY {ql}{col_name}{qr}
+                        LIMIT 10
+                    """
+                else:
+                    sql = f"""
+                        SELECT DISTINCT TOP 10 {ql}{col_name}{qr}
+                        FROM {ql}{table_name}{qr}
+                        WHERE {ql}{col_name}{qr} IS NOT NULL AND CAST({ql}{col_name}{qr} AS NVARCHAR(100)) != ''
+                          AND LEN(CAST({ql}{col_name}{qr} AS NVARCHAR(MAX))) < 50
+                        ORDER BY {ql}{col_name}{qr}
+                    """
+                cursor.execute(sql)
                 values = [str(r[0]).strip() for r in cursor.fetchall()]
-                # Only include if there are meaningful values and not too many
                 if values and len(values) <= 10:
                     samples[col_name] = values
             except Exception:
@@ -348,13 +442,19 @@ def _build_dynamic_prompt(question: str, table_name: str) -> str:
     sample_lines = []
     for col_name, values in samples.items():
         sample_lines.append(f"  {col_name}: {', '.join(values)}")
-
+    
+    # Dialect-aware syntax hints
+    db_type = _get_db_type()
+    if db_type == "postgres":
+        syntax_rule = "- PostgreSQL syntax: LIMIT N (not TOP), NOW() (not GETDATE()), use double quotes \"column\" for identifiers. Column names are lowercase."
+    else:
+        syntax_rule = "- SQL Server syntax: TOP (not LIMIT), GETDATE(), DATEADD(), DATEPART()"
     # Build rules
     rules = [
         f"- Table: {table_name}",
         f"- ALWAYS use FROM {table_name}",
         "- Output ONLY SQL. No text. No markdown. No backticks.",
-        "- SQL Server syntax: TOP (not LIMIT), GETDATE(), DATEADD(), DATEPART()",
+        syntax_rule,
         f"- EXACT column names: {', '.join(col_names)}",
         "- NEVER invent column names. ONLY use columns listed above.",
         "- For counting rows, ALWAYS use COUNT(*), NEVER use COUNT(column_name) — COUNT(column) skips NULLs.",
@@ -362,9 +462,14 @@ def _build_dynamic_prompt(question: str, table_name: str) -> str:
 
     if date_cols:
         dc = date_cols[0]
-        rules.append(f"- Date column: {dc}. Use FORMAT({dc}, 'dd-MMM-yyyy') for display.")
-        rules.append(f"- Date range: {dc} >= DATEADD(day, -7, GETDATE())")
-        rules.append(f"- Weekends: DATEPART(WEEKDAY, {dc}) IN (1, 7)")
+        if db_type == "postgres":
+            rules.append(f"- Date column: {dc}. Use TO_CHAR({dc}, 'DD-Mon-YYYY') for display.")
+            rules.append(f"- Date range: {dc} >= NOW() - INTERVAL '7 days'")
+            rules.append(f"- Weekends: EXTRACT(DOW FROM {dc}) IN (0, 6)")
+        else:
+            rules.append(f"- Date column: {dc}. Use FORMAT({dc}, 'dd-MMM-yyyy') for display.")
+            rules.append(f"- Date range: {dc} >= DATEADD(day, -7, GETDATE())")
+            rules.append(f"- Weekends: DATEPART(WEEKDAY, {dc}) IN (1, 7)")
 
     for sc in status_cols:
         vals = samples.get(sc, [])

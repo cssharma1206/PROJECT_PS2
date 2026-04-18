@@ -45,9 +45,19 @@ DATABASES = {
         "description": "Email & communication tracking system",
         "server": r"GLADIATOR\SQLEXPRESS",
         "tables": {
-            "CommunicationsRequestStatus": {
+            "CommunicationMaster": {
                 "label": "Communications",
-                "description": "Email communications and delivery status",
+                "description": "Email and SMS communications sent to clients",
+                "access": "all",
+            },
+            "CommunicationErrorMaster": {
+                "label": "Communication Errors",
+                "description": "Error details for failed communications",
+                "access": "all",
+            },
+            "ApplicationMaster": {
+                "label": "Applications",
+                "description": "Registered applications (APP001, APP002)",
                 "access": "all",
             },
             "QueryLog": {
@@ -61,20 +71,21 @@ DATABASES = {
                 "access": "admin",
             },
         },
-        "default_table": "CommunicationsRequestStatus",
+        "default_table": "CommunicationMaster",
     },
+
     "anandrathi_trading": {
-        "label": "Trading",
-        "description": "Stock trading & portfolio management",
-        "server": r"GLADIATOR\SQLEXPRESS",
-        "tables": {
-            "TradeHistory": {
-                "label": "Trade History",
-                "description": "Stock trades, orders, and settlements",
-                "access": "all",
-            },
+    "label": "Trading",
+    "description": "Stock trading & portfolio management",
+    "server": r"GLADIATOR\SQLEXPRESS",
+    "tables": {
+        "tradehistory": {                          # lowercase key
+            "label": "Trade History",
+            "description": "Stock trades, orders, and settlements",
+            "access": "all",
         },
-        "default_table": "TradeHistory",
+    },
+    "default_table": "tradehistory",
     },
 }
 
@@ -227,7 +238,7 @@ class MCPBridge:
             from mcp_server import connect_database, generate_sql, execute_query
 
             # Step 1: Connect to the selected database
-            connect_result = connect_database(server=server, database=database)
+            connect_result = connect_database(database_name=database)
             if "FAILED" in connect_result:
                 elapsed = int((time.time() - start_time) * 1000)
                 return self._error_response(question, elapsed, f"Connection failed: {connect_result}")
@@ -244,7 +255,7 @@ class MCPBridge:
                 )
 
             # Step 3: Inject access control (only for Communications main table)
-            if user and database == "anandrathi" and table_name == "CommunicationsRequestStatus":
+            if user and database == "anandrathi" and table_name == "CommunicationMaster":
                 generated_sql = self._inject_access_filter(generated_sql, user)
 
             # Step 4: Execute SQL
@@ -299,7 +310,7 @@ class MCPBridge:
             async with self._get_session() as session:
                 connect_result = await session.call_tool(
                     "connect_database",
-                    {"server": server, "database": database}
+                    {"database_name": database}
                 )
                 connect_text = connect_result.content[0].text if connect_result.content else ""
 
@@ -323,7 +334,7 @@ class MCPBridge:
                     elapsed = int((time.time() - start_time) * 1000)
                     return self._error_response(question, elapsed, f"Could not generate SQL. AI returned: {sql_text}")
 
-                if user and target_table == "CommunicationsRequestStatus":
+                if user and target_table == "CommunicationMaster":
                     generated_sql = self._inject_access_filter(generated_sql, user)
 
                 exec_result = await session.call_tool("execute_query", {"sql": generated_sql})
@@ -353,8 +364,8 @@ class MCPBridge:
     # INDIVIDUAL TOOL WRAPPERS
     # ───────────────────────────────────────────────────────────
 
-    async def connect_database(self, server: str = r"GLADIATOR\SQLEXPRESS", database: str = "anandrathi") -> str:
-        return await self._call_tool("connect_database", {"server": server, "database": database})
+    async def connect_database(self, database_name: str = "anandrathi") -> str:
+        return await self._call_tool("connect_database", {"database_name": database_name})
 
     async def get_schema(self, table_name: str = "") -> str:
         return await self._call_tool("get_schema", {"table_name": table_name})
@@ -391,10 +402,10 @@ class MCPBridge:
             return sql
 
         if app_id and role in ("RM_Head", "RM", "RM_Head2", "RM2", "RM3"):
-            access_filter = f"ReferenceApplicationId = {app_id}"
+            access_filter = f"ApplicationId = {app_id}"
         else:
             username = user.get("username", "")
-            access_filter = f"Receiver LIKE '%{username}%'"
+            access_filter = f"SentTo LIKE '%{username}%'"
 
         sql_upper = sql.upper()
         if "WHERE" in sql_upper:
