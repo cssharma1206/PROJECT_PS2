@@ -63,6 +63,8 @@ export const queryAPI = {
     api.get('/query/tables', { params: database ? { database } : {} }),
   history: (page = 1, limit = 20) =>
     api.get(`/query/history?page=${page}&limit=${limit}`),
+  exportCSV: (sql, database) =>
+    api.post('/query/export-csv', { sql, database }, { responseType: 'blob' }),
 };
 
 export const adminAPI = {

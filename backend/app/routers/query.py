@@ -48,6 +48,8 @@ class QueryResponse(BaseModel):
     data: List[Dict[str, Any]]
     columns: List[str]
     row_count: int
+    total_rows: int = 0
+    truncated: bool = False
     execution_time_ms: int
     insights: List[str]
     error: Optional[str]
@@ -158,7 +160,26 @@ async def natural_language_query(
         raise HTTPException(status_code=400, detail="Question too short")
     if len(question) > 500:
         raise HTTPException(status_code=400, detail="Question too long (max 500 characters)")
-
+    
+    # Pre-Ollama safety filter: reject questions containing destructive intent
+    # before we spend 140s generating SQL for something we'd reject anyway.
+    DANGEROUS_INTENT_KEYWORDS = [
+        'delete', 'drop', 'truncate', 'remove all',
+        'erase', 'wipe', 'destroy', 'purge',
+        'alter table', 'insert into', 'update set',
+        'create table', 'grant', 'revoke',
+    ]
+    question_lower = question.lower()
+    for keyword in DANGEROUS_INTENT_KEYWORDS:
+        if keyword in question_lower:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Query blocked: requests containing '{keyword}' are not allowed. "
+                    f"This platform only supports read-only questions about your data."
+                )
+            )
+        
     start_time = time.time()
     access_filter = _build_access_filter(user)
 
@@ -190,6 +211,8 @@ async def natural_language_query(
                         "data": data,
                         "columns": columns,
                         "row_count": len(data),
+                        "total_rows": len(data),
+                        "truncated": False,
                         "execution_time_ms": elapsed,
                         "insights": insights,
                         "error": error,
@@ -254,3 +277,76 @@ def _log_query(user: dict, question: str, result: dict):
         )
     except Exception as e:
         log_error("QUERY_LOG", str(e), user_id=user.get("user_id"), endpoint="_log_query")
+
+# ═══════════════════════════════════════════════════════════════
+# POST /api/v1/query/export-csv — Download full results as CSV
+# ═══════════════════════════════════════════════════════════════
+
+from fastapi.responses import StreamingResponse
+import csv
+import io
+import re
+
+
+class ExportRequest(BaseModel):
+    sql: str
+    database: Optional[str] = None
+
+
+@router.post("/export-csv")
+async def export_csv(
+    request: ExportRequest,
+    user: dict = Depends(get_current_user),
+):
+    """
+    Re-execute a previously-generated SQL and stream the full result as CSV.
+    Uses a high row cap (50,000) so CSV contains all data, not just the UI preview.
+    Re-validates SQL for safety.
+    """
+    sql = (request.sql or "").strip()
+    database = request.database or DEFAULT_DATABASE
+
+    # Re-validate: SELECT only, no dangerous keywords
+    if not sql.upper().startswith("SELECT"):
+        raise HTTPException(status_code=400, detail="Only SELECT queries can be exported")
+
+    DANGEROUS = ['DROP', 'DELETE', 'INSERT', 'UPDATE', 'ALTER',
+                 'CREATE', 'EXEC', 'EXECUTE', 'TRUNCATE', 'GRANT', 'REVOKE']
+    for kw in DANGEROUS:
+        if re.search(rf'\b{kw}\b', sql.upper()):
+            raise HTTPException(status_code=400, detail=f"Export blocked: {kw} not allowed")
+
+    # Execute with high cap via MCP
+    # Execute with high cap via MCP
+    # Execute with high cap via MCP (direct call, not subprocess)
+    try:
+        data, columns, total, truncated, error = mcp_bridge.execute_for_export(
+            sql=sql, database=database, max_rows=50000
+        )
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"\n═══ EXPORT CSV EXCEPTION ═══\n{tb}\n═══════════════════════════\n", file=__import__('sys').stderr, flush=True)
+        raise HTTPException(status_code=500, detail=f"Export crashed: {type(e).__name__}: {str(e)}")
+
+    if error:
+        print(f"\n═══ EXPORT CSV ERROR ═══\nError string: {error}\n═══════════════════════\n", file=__import__('sys').stderr, flush=True)
+        raise HTTPException(status_code=500, detail=f"Export failed: {error}")
+
+    # Build CSV in memory
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(columns)
+    for row in data:
+        writer.writerow([row.get(c, "") for c in columns])
+    buffer.seek(0)
+
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": 'attachment; filename="query_results.csv"',
+            "X-Row-Count": str(total),
+            "X-Truncated": "true" if truncated else "false",
+        },
+    )

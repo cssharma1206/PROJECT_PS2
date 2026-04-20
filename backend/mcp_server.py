@@ -230,17 +230,18 @@ def get_schema(table_name: str = "") -> str:
 # ═══════════════════════════════════════════════════════════════
 
 @mcp.tool()
-def execute_query(sql: str) -> str:
+def execute_query(sql: str, max_rows: int = 50) -> str:
     """
     Execute a SQL SELECT query and return results.
     Only SELECT queries are allowed.
 
     Args:
         sql: The SQL SELECT query to execute
+        max_rows: Max rows to return (default 50 for UI preview, raise for CSV export)
     """
     is_safe, reason = _validate_sql(sql)
     if not is_safe:
-        return f"BLOCKED: {reason}"
+        return json.dumps({"status": "blocked", "error": reason})
 
     try:
         conn = _get_connection()
@@ -250,33 +251,35 @@ def execute_query(sql: str) -> str:
         if cursor.description is None:
             cursor.close()
             conn.close()
-            return "Query executed but returned no results."
+            return json.dumps({"status": "ok", "columns": [], "rows": [], "total": 0, "truncated": False})
 
         columns = [col[0] for col in cursor.description]
         rows = cursor.fetchall()
         cursor.close()
         conn.close()
 
-        result_lines = [f"Columns: {', '.join(columns)}"]
-        result_lines.append(f"Rows returned: {len(rows)}")
-        result_lines.append("")
-
-        for row in rows[:50]:
+        PREVIEW_CAP = max_rows
+        total_rows = len(rows)
+        preview_rows = []
+        for row in rows[:PREVIEW_CAP]:
             row_data = {}
             for j, val in enumerate(row):
                 if hasattr(val, 'isoformat'):
                     row_data[columns[j]] = val.isoformat()
                 else:
                     row_data[columns[j]] = val
-            result_lines.append(json.dumps(row_data, default=str))
+            preview_rows.append(row_data)
 
-        if len(rows) > 50:
-            result_lines.append(f"... ({len(rows) - 50} more rows)")
-
-        return "\n".join(result_lines)
+        return json.dumps({
+            "status": "ok",
+            "columns": columns,
+            "rows": preview_rows,
+            "total": total_rows,
+            "truncated": total_rows > PREVIEW_CAP,
+        }, default=str)
 
     except Exception as e:
-        return f"SQL Error: {str(e)}"
+        return json.dumps({"status": "error", "error": str(e)})
 
 
 # ═══════════════════════════════════════════════════════════════

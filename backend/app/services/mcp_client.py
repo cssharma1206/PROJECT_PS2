@@ -260,7 +260,7 @@ class MCPBridge:
 
             # Step 4: Execute SQL
             exec_text = execute_query(generated_sql)
-            data, columns = self._parse_execution_result(exec_text)
+            data, columns, total_rows, truncated = self._parse_execution_result(exec_text)
 
             elapsed = int((time.time() - start_time) * 1000)
 
@@ -281,6 +281,8 @@ class MCPBridge:
                 "data": data,
                 "columns": columns,
                 "row_count": len(data),
+                "total_rows": total_rows,
+                "truncated": truncated,
                 "execution_time_ms": elapsed,
                 "insights": insights,
                 "error": None,
@@ -339,8 +341,7 @@ class MCPBridge:
 
                 exec_result = await session.call_tool("execute_query", {"sql": generated_sql})
                 exec_text = exec_result.content[0].text if exec_result.content else ""
-
-                data, columns = self._parse_execution_result(exec_text)
+                data, columns, total_rows, truncated = self._parse_execution_result(exec_text)
                 elapsed = int((time.time() - start_time) * 1000)
 
                 return {
@@ -350,6 +351,8 @@ class MCPBridge:
                     "data": data,
                     "columns": columns,
                     "row_count": len(data),
+                    "total_rows": total_rows,
+                    "truncated": truncated,
                     "execution_time_ms": elapsed,
                     "insights": [f"Found {len(data)} records.", f"Table: {target_table}"],
                     "error": None,
@@ -373,8 +376,30 @@ class MCPBridge:
     async def generate_sql(self, question: str, schema_text: str = "") -> str:
         return await self._call_tool("generate_sql", {"question": question, "schema_text": schema_text})
 
-    async def execute_query(self, sql: str) -> str:
-        return await self._call_tool("execute_query", {"sql": sql})
+    async def execute_query(self, sql: str, max_rows: int = 50) -> str:
+        return await self._call_tool("execute_query", {"sql": sql, "max_rows": max_rows})
+    
+    def execute_for_export(self, sql: str, database: str, max_rows: int = 50000) -> tuple:
+        """
+        Execute SQL with a high row cap for CSV export.
+        Uses direct function calls (avoids MCP STDIO issues on Windows).
+        Returns (data, columns, total_rows, truncated, error).
+        """
+        try:
+            from mcp_server import connect_database, execute_query
+
+            connect_result = connect_database(database_name=database)
+            if "FAILED" in connect_result:
+                return [], [], 0, False, f"Connection failed: {connect_result}"
+
+            exec_text = execute_query(sql, max_rows=max_rows)
+            data, columns, total, truncated = self._parse_execution_result(exec_text)
+            return data, columns, total, truncated, None
+        except Exception as e:
+            import sys, traceback
+            tb_str = traceback.format_exc()
+            print(f"\n═══ EXPORT DIRECT EXCEPTION ═══\n{tb_str}\n═══════════════════════════\n", file=sys.stderr, flush=True)
+            return [], [], 0, False, f"{type(e).__name__}: {str(e)}"
 
     # ───────────────────────────────────────────────────────────
     # HELPERS
@@ -425,29 +450,21 @@ class MCPBridge:
         return sql
 
     def _parse_execution_result(self, exec_text: str) -> tuple:
-        if not exec_text or "BLOCKED" in exec_text or "Error" in exec_text:
-            return [], []
-
-        lines = exec_text.strip().split('\n')
-        columns = []
-        data = []
-
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith("Columns:"):
-                columns = [c.strip() for c in line.replace("Columns:", "").split(",")]
-                continue
-            if line.startswith("Rows returned:") or line.startswith("..."):
-                continue
-            try:
-                row = json.loads(line)
-                if isinstance(row, dict):
-                    data.append(row)
-            except (json.JSONDecodeError, ValueError):
-                continue
-        return data, columns
+        """Parse structured JSON from mcp_server. Returns (data, columns, total, truncated)."""
+        if not exec_text:
+            return [], [], 0, False
+        try:
+            parsed = json.loads(exec_text)
+        except (json.JSONDecodeError, ValueError):
+            return [], [], 0, False
+        if parsed.get("status") != "ok":
+            return [], [], 0, False
+        return (
+            parsed.get("rows", []),
+            parsed.get("columns", []),
+            parsed.get("total", 0),
+            parsed.get("truncated", False),
+        )
 
     def _error_response(self, question: str, elapsed: int, error: str) -> dict:
         return {
@@ -457,6 +474,8 @@ class MCPBridge:
             "data": [],
             "columns": [],
             "row_count": 0,
+            "total_rows": 0,
+            "truncated": False,
             "execution_time_ms": elapsed,
             "insights": [f"Error: {error}"],
             "error": error,

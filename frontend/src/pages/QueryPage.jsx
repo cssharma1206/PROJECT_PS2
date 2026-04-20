@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { queryAPI } from '../services/api';
 import { useAuth } from '../context/AuthContext';
-import { Send, Database, Clock, Download, AlertCircle, Loader, Trash2, ChevronDown, Server } from 'lucide-react';
+import { Send, Database, Clock, Download, AlertCircle, Loader, Trash2, ChevronDown, ChevronRight, Server } from 'lucide-react';
 
 const STORAGE_KEY = 'query_chat_messages';
 const DB_KEY = 'query_selected_db';
@@ -11,6 +11,8 @@ export default function QueryPage() {
   const { user } = useAuth();
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [expandedSql, setExpandedSql] = useState({});
+  const [exporting, setExporting] = useState({}); // Track which message is exporting
   const chatEndRef = useRef(null);
 
   // Database & table state
@@ -144,15 +146,23 @@ export default function QueryPage() {
 
   const clearChat = () => { setMessages([]); sessionStorage.removeItem(STORAGE_KEY); };
 
-  const exportCSV = (data, columns) => {
-    if (!data || !columns) return;
-    const header = columns.join(',');
-    const rows = data.map((row) => columns.map((c) => `"${row[c] ?? ''}"`).join(','));
-    const csv = [header, ...rows].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = 'query_results.csv'; a.click();
+  const exportCSV = async (msgIdx, sql, database) => {
+    if (!sql) return;
+    setExporting((prev) => ({ ...prev, [msgIdx]: true }));
+    try {
+      const res = await queryAPI.exportCSV(sql, database);
+      const blob = new Blob([res.data], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'query_results.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      alert('Export failed: ' + (err.response?.data?.detail || err.message));
+    } finally {
+      setExporting((prev) => ({ ...prev, [msgIdx]: false }));
+    }
   };
 
   const currentDbLabel = databases.find(d => d.database === selectedDb)?.label || selectedDb;
@@ -241,21 +251,37 @@ export default function QueryPage() {
                 <div style={s.errorBox}><AlertCircle size={16} /><span>{msg.content.error}</span></div>
               ) : (
                 <div>
-                  {msg.content.generated_sql && (
+                  {msg.content.generated_sql && user?.role_name === 'Admin' && (
                     <div style={s.sqlBox}>
-                      <div style={s.sqlHeader}>
-                        <Database size={14} /><span>Generated SQL</span>
+                      <button
+                        style={s.sqlToggle}
+                        onClick={() => setExpandedSql((prev) => ({ ...prev, [idx]: !prev[idx] }))}
+                      >
+                        {expandedSql[idx] ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                        <Database size={14} />
+                        <span>Generated SQL</span>
                         <span style={s.methodBadge}>{msg.content.method}</span>
-                      </div>
-                      <pre style={s.sqlCode}>{msg.content.generated_sql}</pre>
+                      </button>
+                      {expandedSql[idx] && (
+                        <pre style={s.sqlCode}>{msg.content.generated_sql}</pre>
+                      )}
                     </div>
                   )}
                   <div style={s.resultInfo}>
-                    <span>{msg.content.row_count} rows returned</span>
+                    <span>
+                      {msg.content.truncated
+                        ? `Showing ${msg.content.row_count} of ${msg.content.total_rows} rows`
+                        : `${msg.content.row_count} rows returned`}
+                    </span>
                     {msg.content.execution_time_ms && (
                       <span style={s.timeInfo}><Clock size={12} /> {msg.content.execution_time_ms}ms</span>
                     )}
                   </div>
+                  {msg.content.truncated && (
+                    <div style={s.truncateBanner}>
+                      Table preview is limited to {msg.content.row_count} rows. Click <strong>Export CSV</strong> to download all {msg.content.total_rows} rows.
+                    </div>
+                  )}
                   {msg.content.data && msg.content.data.length > 0 && (
                     <div style={s.tableWrap}>
                       <table style={s.table}>
@@ -263,19 +289,26 @@ export default function QueryPage() {
                           {msg.content.columns.map((col) => <th key={col} style={s.th}>{col}</th>)}
                         </tr></thead>
                         <tbody>
-                          {msg.content.data.slice(0, 20).map((row, ri) => (
+                          {msg.content.data.map((row, ri) => (
                             <tr key={ri}>
                               {msg.content.columns.map((col) => <td key={col} style={s.td}>{row[col] ?? '-'}</td>)}
                             </tr>
                           ))}
                         </tbody>
                       </table>
-                      {msg.content.data.length > 20 && <p style={s.moreRows}>...and {msg.content.data.length - 20} more rows</p>}
                     </div>
                   )}
-                  {msg.content.data && msg.content.data.length > 0 && (
-                    <button style={s.exportBtn} onClick={() => exportCSV(msg.content.data, msg.content.columns)}>
-                      <Download size={14} /> Export CSV
+                  {msg.content.generated_sql && msg.content.data && msg.content.data.length > 0 && (
+                    <button
+                      style={s.exportBtn}
+                      onClick={() => exportCSV(idx, msg.content.generated_sql, selectedDb)}
+                      disabled={exporting[idx]}
+                    >
+                      {exporting[idx] ? (
+                        <><Loader size={14} className="spin" /> Exporting...</>
+                      ) : (
+                        <><Download size={14} /> Export CSV{msg.content.truncated ? ` (all ${msg.content.total_rows} rows)` : ''}</>
+                      )}
                     </button>
                   )}
                 </div>
@@ -335,6 +368,7 @@ const s = {
   errorBox: { display: 'flex', alignItems: 'flex-start', gap: 8, color: '#D4620A', background: '#FEF0E4', padding: '10px 14px', borderRadius: 8, fontSize: 13 },
   sqlBox: { background: '#1E1E2E', borderRadius: 8, overflow: 'hidden', marginBottom: 10 },
   sqlHeader: { display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px', background: '#2A2A3E', color: '#8B94A6', fontSize: 11, fontWeight: 500 },
+  sqlToggle: { display: 'flex', alignItems: 'center', gap: 6, width: '100%', padding: '8px 12px', background: '#2A2A3E', color: '#8B94A6', fontSize: 11, fontWeight: 500, border: 'none', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' },
   methodBadge: { marginLeft: 'auto', padding: '2px 8px', borderRadius: 4, background: '#0D7C4A33', color: '#0D7C4A', fontSize: 10, fontWeight: 600 },
   sqlCode: { padding: '10px 14px', margin: 0, color: '#CDD6F4', fontSize: 12, fontFamily: "'JetBrains Mono', monospace", whiteSpace: 'pre-wrap', wordBreak: 'break-all' },
   resultInfo: { display: 'flex', alignItems: 'center', gap: 12, fontSize: 12, color: '#8B94A6', marginBottom: 10 },
@@ -344,6 +378,7 @@ const s = {
   th: { padding: '8px 10px', textAlign: 'left', fontWeight: 600, color: '#5A6577', background: '#F8FAFB', borderBottom: '1px solid #E8ECF0', position: 'sticky', top: 0, fontSize: 11 },
   td: { padding: '7px 10px', borderBottom: '1px solid #F0F2F5', color: '#2D3748' },
   moreRows: { textAlign: 'center', fontSize: 12, color: '#8B94A6', padding: 8, margin: 0 },
+  truncateBanner: { fontSize: 12, color: '#2D5A87', background: '#EAF2FA', border: '1px solid #B8D4EC', padding: '8px 12px', borderRadius: 6, marginBottom: 10 },
   exportBtn: { display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 14px', borderRadius: 6, border: '1px solid #E8ECF0', background: '#FFF', fontSize: 12, fontWeight: 500, color: '#4A5568', cursor: 'pointer', fontFamily: 'inherit' },
   timestamp: { display: 'block', fontSize: 10, color: '#A0A8B6', marginTop: 6 },
   loadingDots: { display: 'flex', alignItems: 'center', gap: 8, color: '#8B94A6', fontSize: 13 },

@@ -23,6 +23,8 @@ export function AuthProvider({ children }) {
   }, []);
 
   const login = async (username, password) => {
+    // Clear any previous user's cached UI state
+    sessionStorage.clear();
     const res = await authAPI.login(username, password);
     const { access_token, refresh_token, user: userData } = res.data;
     localStorage.setItem('access_token', access_token);
@@ -34,6 +36,7 @@ export function AuthProvider({ children }) {
   const logout = async () => {
     try { await authAPI.logout(); } catch {}
     localStorage.clear();
+    sessionStorage.clear();
     setUser(null);
   };
 

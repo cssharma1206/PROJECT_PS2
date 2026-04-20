@@ -3,13 +3,24 @@ Dashboard Router - API endpoints for dashboard data.
   GET /api/v1/dashboard/stats          - KPI counts (sent, failed, pending, total)
   GET /api/v1/dashboard/charts/status  - Status distribution (pie chart data)
   GET /api/v1/dashboard/charts/trend   - Daily trend (line chart data)
-  GET /api/v1/dashboard/charts/vendors - Vendor performance (bar chart data)
+  GET /api/v1/dashboard/charts/vendors - Application breakdown (bar chart data) — was vendor in old schema
   GET /api/v1/dashboard/top-clients    - Top clients by volume
+
+Schema notes (migrated to new 4-table schema):
+  Table:    CommunicationMaster (replaces CommunicationsRequestStatus)
+  Columns:  ComID, ServiceType, ApplicationId, Message,
+            SentTo, SentBy, CreatedAt, Status
+  Statuses: SUCCESS, FAILED, BOUNCE, DROPPED, DUPLICATE
+
+KPI mapping (tonight — simple 3-card layout preserved):
+  sent    = SUCCESS
+  failed  = FAILED
+  pending = BOUNCE + DROPPED + DUPLICATE   (catch-all for non-success/non-failure)
 
 ALL endpoints are filtered by the user's role:
   - Admin:   sees ALL data
-  - RM/Head: sees only their team's data (by ReferenceApplicationId)
-  - Client:  sees only their own data (by Receiver email)
+  - RM/Head: sees only their team's data (by ApplicationId)
+  - Client:  sees only their own data (by SentTo)
 """
 
 from fastapi import APIRouter, Depends, Query
@@ -36,8 +47,8 @@ def build_access_filter(user: dict) -> str:
     This is the KEY security mechanism - data is filtered at the SQL level.
 
     Admin       -> no filter (sees everything)
-    RM / Head   -> WHERE ReferenceApplicationId = {application_id}
-    Client      -> WHERE Receiver LIKE '%{username}%'
+    RM / Head   -> WHERE ApplicationId = {application_id}
+    Client      -> WHERE SentTo LIKE '%{username}%'
     """
     role = user.get("role", "")
 
@@ -46,11 +57,11 @@ def build_access_filter(user: dict) -> str:
 
     app_id = user.get("application_id")
     if app_id and role in ("RM_Head", "RM", "RM_Head2", "RM2", "RM3"):
-        return f"WHERE ReferenceApplicationId = {app_id}"
+        return f"WHERE ApplicationId = {app_id}"
 
     # Client - can only see their own communications
     username = user.get("username", "")
-    return f"WHERE Receiver LIKE '%{username}%'"
+    return f"WHERE SentTo LIKE '%{username}%'"
 
 
 def add_and_clause(base_filter: str, condition: str) -> str:
@@ -68,7 +79,11 @@ def add_and_clause(base_filter: str, condition: str) -> str:
 def get_stats(user: dict = Depends(get_current_user)):
     """
     Returns 4 KPI numbers: sent, failed, pending, total.
-    Filtered by user's access scope.
+
+    Status mapping for the 3-card layout:
+      sent    = SUCCESS
+      failed  = FAILED
+      pending = BOUNCE | DROPPED | DUPLICATE  (non-success, non-failure)
     """
     access_filter = build_access_filter(user)
     conn = get_db_connection()
@@ -76,25 +91,33 @@ def get_stats(user: dict = Depends(get_current_user)):
     try:
         cursor = conn.cursor()
 
-        # Get counts for each status
-        stats = {}
-        for status in ["SENT", "FAILED", "PENDING"]:
-            where = add_and_clause(access_filter, f"LastStatus = '{status}'")
-            cursor.execute(f"SELECT COUNT(*) FROM CommunicationsRequestStatus {where}")
-            stats[status.lower()] = cursor.fetchone()[0]
+        # SUCCESS -> "sent"
+        where = add_and_clause(access_filter, "Status = 'SUCCESS'")
+        cursor.execute(f"SELECT COUNT(*) FROM CommunicationMaster {where}")
+        sent = cursor.fetchone()[0]
 
-        # Total count
-        cursor.execute(f"SELECT COUNT(*) FROM CommunicationsRequestStatus {access_filter}")
+        # FAILED -> "failed"
+        where = add_and_clause(access_filter, "Status = 'FAILED'")
+        cursor.execute(f"SELECT COUNT(*) FROM CommunicationMaster {where}")
+        failed = cursor.fetchone()[0]
+
+        # BOUNCE | DROPPED | DUPLICATE -> "pending" (catch-all bucket)
+        where = add_and_clause(access_filter, "Status IN ('BOUNCE', 'DROPPED', 'DUPLICATE')")
+        cursor.execute(f"SELECT COUNT(*) FROM CommunicationMaster {where}")
+        pending = cursor.fetchone()[0]
+
+        # Total count (all rows)
+        cursor.execute(f"SELECT COUNT(*) FROM CommunicationMaster {access_filter}")
         total = cursor.fetchone()[0]
 
-        # Calculate success rate
-        success_rate = round((stats["sent"] / total * 100), 1) if total > 0 else 0.0
+        # Success rate based on SUCCESS vs total
+        success_rate = round((sent / total * 100), 1) if total > 0 else 0.0
 
         cursor.close()
         return DashboardStats(
-            sent=stats["sent"],
-            failed=stats["failed"],
-            pending=stats["pending"],
+            sent=sent,
+            failed=failed,
+            pending=pending,
             total=total,
             success_rate=success_rate,
         )
@@ -112,7 +135,8 @@ def get_stats(user: dict = Depends(get_current_user)):
 @router.get("/charts/status", response_model=StatusChartResponse)
 def get_status_chart(user: dict = Depends(get_current_user)):
     """
-    Returns status distribution data for a pie/donut chart.
+    Returns status distribution (all 5 statuses) for a pie/donut chart.
+    Unlike the KPI cards (which bucket to 3), the pie shows the truth.
     """
     access_filter = build_access_filter(user)
     conn = get_db_connection()
@@ -120,10 +144,10 @@ def get_status_chart(user: dict = Depends(get_current_user)):
     try:
         cursor = conn.cursor()
         cursor.execute(f"""
-            SELECT LastStatus, COUNT(*) AS Count
-            FROM CommunicationsRequestStatus
+            SELECT Status, COUNT(*) AS Count
+            FROM CommunicationMaster
             {access_filter}
-            GROUP BY LastStatus
+            GROUP BY Status
             ORDER BY Count DESC
         """)
         rows = cursor.fetchall()
@@ -150,10 +174,10 @@ def get_trend_chart(
 ):
     """
     Returns daily counts for the last N days (default 7).
-    Includes total, sent, and failed per day for a multi-line chart.
+    Includes total, sent (SUCCESS), and failed per day for a multi-line chart.
     """
     access_filter = build_access_filter(user)
-    date_condition = f"SubmitDate >= DATEADD(day, -{days}, GETDATE())"
+    date_condition = f"CreatedAt >= DATEADD(day, -{days}, GETDATE())"
     where = add_and_clause(access_filter, date_condition)
 
     conn = get_db_connection()
@@ -161,13 +185,13 @@ def get_trend_chart(
         cursor = conn.cursor()
         cursor.execute(f"""
             SELECT
-                FORMAT(SubmitDate, 'yyyy-MM-dd') AS Date,
+                FORMAT(CreatedAt, 'yyyy-MM-dd') AS Date,
                 COUNT(*) AS Total,
-                SUM(CASE WHEN LastStatus = 'SENT' THEN 1 ELSE 0 END) AS Sent,
-                SUM(CASE WHEN LastStatus = 'FAILED' THEN 1 ELSE 0 END) AS Failed
-            FROM CommunicationsRequestStatus
+                SUM(CASE WHEN Status = 'SUCCESS' THEN 1 ELSE 0 END) AS Sent,
+                SUM(CASE WHEN Status = 'FAILED' THEN 1 ELSE 0 END) AS Failed
+            FROM CommunicationMaster
             {where}
-            GROUP BY FORMAT(SubmitDate, 'yyyy-MM-dd')
+            GROUP BY FORMAT(CreatedAt, 'yyyy-MM-dd')
             ORDER BY Date
         """)
         rows = cursor.fetchall()
@@ -187,13 +211,19 @@ def get_trend_chart(
 
 
 # ═══════════════════════════════════════════════════════════════
-# GET /dashboard/charts/vendors - Vendor Performance Bar Chart
+# GET /dashboard/charts/vendors - Application Breakdown (was Vendor)
+# ═══════════════════════════════════════════════════════════════
+# Old schema grouped by ReferenceVendorId. New schema has no vendor
+# concept, so we group by ApplicationId (APP001 vs APP002). Same
+# response shape so frontend doesn't need changes.
 # ═══════════════════════════════════════════════════════════════
 
 @router.get("/charts/vendors", response_model=VendorChartResponse)
 def get_vendor_chart(user: dict = Depends(get_current_user)):
     """
-    Returns vendor-wise performance data: total, sent, failed, pending, success rate.
+    Returns per-application performance data: total, sent, failed,
+    pending (catch-all), and success rate.
+    Kept on the /charts/vendors route for frontend compatibility.
     """
     access_filter = build_access_filter(user)
     conn = get_db_connection()
@@ -202,14 +232,14 @@ def get_vendor_chart(user: dict = Depends(get_current_user)):
         cursor = conn.cursor()
         cursor.execute(f"""
             SELECT
-                ReferenceVendorId,
+                ApplicationId,
                 COUNT(*) AS Total,
-                SUM(CASE WHEN LastStatus = 'SENT' THEN 1 ELSE 0 END) AS Sent,
-                SUM(CASE WHEN LastStatus = 'FAILED' THEN 1 ELSE 0 END) AS Failed,
-                SUM(CASE WHEN LastStatus = 'PENDING' THEN 1 ELSE 0 END) AS Pending
-            FROM CommunicationsRequestStatus
+                SUM(CASE WHEN Status = 'SUCCESS' THEN 1 ELSE 0 END) AS Sent,
+                SUM(CASE WHEN Status = 'FAILED' THEN 1 ELSE 0 END) AS Failed,
+                SUM(CASE WHEN Status IN ('BOUNCE', 'DROPPED', 'DUPLICATE') THEN 1 ELSE 0 END) AS Pending
+            FROM CommunicationMaster
             {access_filter}
-            GROUP BY ReferenceVendorId
+            GROUP BY ApplicationId
             ORDER BY Total DESC
         """)
         rows = cursor.fetchall()
@@ -244,6 +274,7 @@ def get_top_clients(
 ):
     """
     Returns top N clients ranked by communication volume.
+    'Client' here = the SentTo value (recipient phone/email).
     """
     access_filter = build_access_filter(user)
     conn = get_db_connection()
@@ -252,12 +283,12 @@ def get_top_clients(
         cursor = conn.cursor()
         cursor.execute(f"""
             SELECT TOP ({limit})
-                Receiver,
+                SentTo,
                 COUNT(*) AS Total,
-                SUM(CASE WHEN LastStatus = 'FAILED' THEN 1 ELSE 0 END) AS Failed
-            FROM CommunicationsRequestStatus
+                SUM(CASE WHEN Status = 'FAILED' THEN 1 ELSE 0 END) AS Failed
+            FROM CommunicationMaster
             {access_filter}
-            GROUP BY Receiver
+            GROUP BY SentTo
             ORDER BY Total DESC
         """)
         rows = cursor.fetchall()

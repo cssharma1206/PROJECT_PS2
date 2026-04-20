@@ -109,7 +109,7 @@ export default function AdminPage() {
                 <table style={s.table}>
                   <thead>
                     <tr>
-                      {['ID', 'Question', 'Method', 'Results', 'Success', 'Time'].map((h) => (
+                      {['ID', 'Question', 'Generated SQL', 'Method', 'Results', 'Success', 'Time'].map((h) => (
                         <th key={h} style={s.th}>{h}</th>
                       ))}
                     </tr>
@@ -118,7 +118,8 @@ export default function AdminPage() {
                     {queryLogs.map((q) => (
                       <tr key={q.log_id}>
                         <td style={s.td}>{q.log_id}</td>
-                        <td style={{ ...s.td, maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{q.query_text}</td>
+                        <td style={{ ...s.td, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={q.query_text}>{q.query_text}</td>
+                        <td style={{ ...s.td, maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: '#4A5568' }} title={q.generated_sql}>{q.generated_sql || '-'}</td>
                         <td style={s.td}><span style={s.methodBadge}>{q.method || '-'}</span></td>
                         <td style={s.td}>{q.result_count}</td>
                         <td style={s.td}>{q.was_successful ? 'Yes' : 'No'}</td>
