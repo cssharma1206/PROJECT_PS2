@@ -23,118 +23,87 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from app.services.error_logger import log_error
+from app.services.access_control import build_app_filter
 
-
-# ═══════════════════════════════════════════════════════════════
-# MCP SERVER LOCATION
-# ═══════════════════════════════════════════════════════════════
 
 MCP_SERVER_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "mcp_server.py"
 )
-
-
 # ═══════════════════════════════════════════════════════════════
 # DATABASE & TABLE CONFIGURATION
+# Single source of truth: db_config.json at backend root.
+# Adding a new DB = edit JSON, restart backend. No code change.
 # ═══════════════════════════════════════════════════════════════
 
-DATABASES = {
-    "anandrathi": {
-        "label": "Communications",
-        "description": "Email & communication tracking system",
-        "server": r"GLADIATOR\SQLEXPRESS",
-        "tables": {
-            "CommunicationMaster": {
-                "label": "Communications",
-                "description": "Email and SMS communications sent to clients",
-                "access": "all",
-            },
-            "CommunicationErrorMaster": {
-                "label": "Communication Errors",
-                "description": "Error details for failed communications",
-                "access": "all",
-            },
-            "ApplicationMaster": {
-                "label": "Applications",
-                "description": "Registered applications (APP001, APP002)",
-                "access": "all",
-            },
-            "QueryLog": {
-                "label": "Query Logs",
-                "description": "History of all queries executed",
-                "access": "admin",
-            },
-            "ErrorLog": {
-                "label": "Error Logs",
-                "description": "Application errors and exceptions",
-                "access": "admin",
-            },
-        },
-        "default_table": "CommunicationMaster",
-    },
+_CONFIG_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "db_config.json"
+)
 
-    "anandrathi_trading": {
-    "label": "Trading",
-    "description": "Stock trading & portfolio management",
-    "server": r"GLADIATOR\SQLEXPRESS",
-    "tables": {
-        "tradehistory": {                          # lowercase key
-            "label": "Trade History",
-            "description": "Stock trades, orders, and settlements",
-            "access": "all",
-        },
-    },
-    "default_table": "tradehistory",
-    },
-}
 
-DEFAULT_DATABASE = "anandrathi"
+def _load_db_config() -> dict:
+    """Load DB config from db_config.json. Raises if missing or malformed."""
+    try:
+        with open(_CONFIG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"db_config.json not found at {_CONFIG_FILE}. "
+            f"This file is required for multi-database support."
+        )
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"db_config.json is malformed: {e}")
+
+
+_CONFIG = _load_db_config()
+DATABASES = _CONFIG.get("databases", {})
+DEFAULT_DATABASE = _CONFIG.get("default_database", "anandrathi")
 
 
 def get_available_databases() -> list:
-    """Get list of all available databases."""
-    dbs = []
-    for db_name, config in DATABASES.items():
-        dbs.append({
+    """Get list of all available databases from config."""
+    return [
+        {
             "database": db_name,
-            "label": config["label"],
-            "description": config["description"],
-        })
-    return dbs
+            "label": cfg.get("label", db_name),
+            "description": cfg.get("description", ""),
+        }
+        for db_name, cfg in DATABASES.items()
+    ]
 
 
 def get_allowed_tables(database: str, user_role: str) -> list:
     """Get list of tables a user can query in a given database."""
-    db_config = DATABASES.get(database)
-    if not db_config:
-        return []
+    db_config = DATABASES.get(database, {})
+    tables_cfg = db_config.get("tables", {})
 
-    tables = []
-    for table_name, config in db_config["tables"].items():
-        if config["access"] == "all" or (config["access"] == "admin" and user_role == "Admin"):
-            tables.append({
+    result = []
+    for table_name, cfg in tables_cfg.items():
+        access = cfg.get("access", "all")
+        if access == "all" or (access == "admin" and user_role == "Admin"):
+            result.append({
                 "table_name": table_name,
-                "label": config["label"],
-                "description": config["description"],
+                "label": cfg.get("label", table_name),
+                "description": cfg.get("description", ""),
             })
-    return tables
+    return result
 
 
 def get_default_table(database: str) -> str:
     """Get the default table for a database."""
-    db_config = DATABASES.get(database)
-    if db_config:
-        return db_config["default_table"]
-    return ""
+    return DATABASES.get(database, {}).get("default_table", "")
 
 
 def get_server_for_db(database: str) -> str:
-    """Get the SQL Server instance for a database."""
-    db_config = DATABASES.get(database)
-    if db_config:
-        return db_config["server"]
-    return r"GLADIATOR\SQLEXPRESS"
+    """
+    Get the SQL Server instance for a database (kept for backward compat).
+    Returns empty string for non-SQL-Server DBs.
+    """
+    cfg = DATABASES.get(database, {})
+    if cfg.get("db_type") == "sqlserver":
+        return cfg.get("server", "")
+    return ""
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -173,6 +142,7 @@ class MCPBridge:
         user: dict = None,
         table_name: str = None,
         database: str = None,
+        category: str = None,
     ) -> Dict[str, Any]:
         """
         Full pipeline: question → SQL → execute → results.
@@ -190,9 +160,24 @@ class MCPBridge:
                 f"Database '{db}' is not configured."
             )
 
-        # Determine target table
         db_config = DATABASES[db]
-        target_table = table_name or db_config["default_table"]
+
+        # Resolve category → list of tables (category mode)
+        category_tables = []
+        if category:
+            cats = db_config.get("categories", {})
+            if category not in cats:
+                elapsed = int((time.time() - start_time) * 1000)
+                return self._error_response(
+                    question, elapsed,
+                    f"Category '{category}' not found in {db_config.get('label', db)} database."
+                )
+            category_tables = cats[category].get("tables", [])
+            # Use the category's default_table as "primary" for access filter purposes
+            target_table = cats[category].get("default_table") or (category_tables[0] if category_tables else "")
+        else:
+            # Single-table mode (existing behavior)
+            target_table = table_name or db_config.get("default_table", "")
 
         # Validate table exists in this database
         if target_table not in db_config["tables"]:
@@ -214,7 +199,10 @@ class MCPBridge:
 
         # Route: Use direct calls (avoids STDIO issues on Windows)
         # MCP subprocess path kept for future use / Claude Code
-        return self._ask_question_direct(question, user, target_table, db, server)
+        return self._ask_question_direct(
+            question, user, target_table, db, server,
+            category=category, category_tables=category_tables,
+        )
 
     # ───────────────────────────────────────────────────────────
     # DIRECT FUNCTION CALL PATH
@@ -227,6 +215,8 @@ class MCPBridge:
         table_name: str = None,
         database: str = "anandrathi",
         server: str = r"GLADIATOR\SQLEXPRESS",
+        category: str = None,
+        category_tables: list = None,
     ) -> Dict[str, Any]:
         """
         Calls mcp_server functions directly.
@@ -243,8 +233,15 @@ class MCPBridge:
                 elapsed = int((time.time() - start_time) * 1000)
                 return self._error_response(question, elapsed, f"Connection failed: {connect_result}")
 
-            # Step 2: Generate SQL (dynamic prompt reads schema from connected DB)
-            sql_text = generate_sql(question, "", table_name)
+            # Step 2: Generate SQL — use category mode if category provided
+            if category and category_tables:
+                sql_text = generate_sql(
+                    question, "",
+                    category_tables=",".join(category_tables),
+                    category_name=category,
+                )
+            else:
+                sql_text = generate_sql(question, "", table_name)
             generated_sql = self._extract_sql(sql_text)
 
             if not generated_sql:
@@ -255,8 +252,9 @@ class MCPBridge:
                 )
 
             # Step 3: Inject access control (only for Communications main table)
+            # Step 3: Inject access control (only for Communications main table)
             if user and database == "anandrathi" and table_name == "CommunicationMaster":
-                generated_sql = self._inject_access_filter(generated_sql, user)
+                generated_sql = self._inject_access_filter(generated_sql, user, database=database)
 
             # Step 4: Execute SQL
             exec_text = execute_query(generated_sql)
@@ -337,7 +335,7 @@ class MCPBridge:
                     return self._error_response(question, elapsed, f"Could not generate SQL. AI returned: {sql_text}")
 
                 if user and target_table == "CommunicationMaster":
-                    generated_sql = self._inject_access_filter(generated_sql, user)
+                    generated_sql = self._inject_access_filter(generated_sql, user, database=database)
 
                 exec_result = await session.call_tool("execute_query", {"sql": generated_sql})
                 exec_text = exec_result.content[0].text if exec_result.content else ""
@@ -419,18 +417,23 @@ class MCPBridge:
             return sql
         return None
 
-    def _inject_access_filter(self, sql: str, user: dict) -> str:
-        role = user.get("role", "")
-        app_id = user.get("application_id")
+    def _inject_access_filter(self, sql: str, user: dict, database: str = None) -> str:
+        """
+        Inject access control filter based on ApplicationAccessMaster.
+        Admin (role=Admin + no access rows) → SQL unchanged.
+        Scoped user → AND ApplicationId IN (...) added.
+        Blocked user → AND 1=0 added (fail-safe).
 
-        if role == "Admin":
+        Only applies to the Communications DB (anandrathi). Other DBs
+        (Trading on Postgres) don't have ApplicationId column.
+        """
+        # Only apply to the Communications database
+        if database and database != "anandrathi":
             return sql
 
-        if app_id and role in ("RM_Head", "RM", "RM_Head2", "RM2", "RM3"):
-            access_filter = f"ApplicationId = {app_id}"
-        else:
-            username = user.get("username", "")
-            access_filter = f"SentTo LIKE '%{username}%'"
+        access_filter, scope = build_app_filter(user, column="ApplicationId")
+        if not access_filter:
+            return sql  # admin, no change
 
         sql_upper = sql.upper()
         if "WHERE" in sql_upper:

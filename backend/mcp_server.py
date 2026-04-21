@@ -290,6 +290,77 @@ def execute_query(sql: str, max_rows: int = 50) -> str:
 SKIP_SAMPLE_COLUMNS = {'RequestData', 'Body', 'Subject', 'Gu_id',
                        'TrackingId', 'Password', 'PasswordHash'}
 
+def _get_foreign_keys(table_names: list) -> list:
+    """
+    Read foreign key relationships for a list of tables.
+    Returns list of dicts: [{from_table, from_column, to_table, to_column}, ...]
+    Dialect-aware: SQL Server uses INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS,
+    Postgres uses pg_catalog.
+    """
+    if not table_names:
+        return []
+
+    db_type = _get_db_type()
+    fks = []
+
+    try:
+        conn = _get_connection()
+        cursor = conn.cursor()
+
+        if db_type == "sqlserver":
+            placeholders = ",".join(["?"] * len(table_names))
+            cursor.execute(f"""
+                SELECT
+                    fk_tab.TABLE_NAME AS from_table,
+                    fk_col.COLUMN_NAME AS from_column,
+                    pk_tab.TABLE_NAME AS to_table,
+                    pk_col.COLUMN_NAME AS to_column
+                FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc
+                JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE fk_col
+                    ON rc.CONSTRAINT_NAME = fk_col.CONSTRAINT_NAME
+                JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS fk_tab
+                    ON rc.CONSTRAINT_NAME = fk_tab.CONSTRAINT_NAME
+                JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE pk_col
+                    ON rc.UNIQUE_CONSTRAINT_NAME = pk_col.CONSTRAINT_NAME
+                    AND fk_col.ORDINAL_POSITION = pk_col.ORDINAL_POSITION
+                JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS pk_tab
+                    ON rc.UNIQUE_CONSTRAINT_NAME = pk_tab.CONSTRAINT_NAME
+                WHERE fk_tab.TABLE_NAME IN ({placeholders})
+                  AND pk_tab.TABLE_NAME IN ({placeholders})
+            """, tuple(table_names) + tuple(table_names))
+        else:  # postgres
+            placeholders = ",".join(["%s"] * len(table_names))
+            cursor.execute(f"""
+                SELECT
+                    tc.table_name AS from_table,
+                    kcu.column_name AS from_column,
+                    ccu.table_name AS to_table,
+                    ccu.column_name AS to_column
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                    ON tc.constraint_name = kcu.constraint_name
+                JOIN information_schema.constraint_column_usage ccu
+                    ON tc.constraint_name = ccu.constraint_name
+                WHERE tc.constraint_type = 'FOREIGN KEY'
+                  AND tc.table_name IN ({placeholders})
+                  AND ccu.table_name IN ({placeholders})
+            """, tuple(table_names) + tuple(table_names))
+
+        for row in cursor.fetchall():
+            fks.append({
+                "from_table": row[0],
+                "from_column": row[1],
+                "to_table": row[2],
+                "to_column": row[3],
+            })
+
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"FK read error: {e}", file=sys.stderr)
+        return []
+
+    return fks
 
 def _get_table_names() -> list:
     """Get all user table names from the connected database."""
@@ -406,6 +477,17 @@ def _get_schema_and_samples(table_name: str) -> tuple:
 
     return columns, samples, total_rows
 
+def _get_multi_table_schema(table_names: list) -> dict:
+    """
+    Get column info and sample values for multiple tables.
+    Returns {table_name: {"columns": [...], "samples": {...}, "rows": N}}
+    """
+    result = {}
+    for t in table_names:
+        cols, samples, total = _get_schema_and_samples(t)
+        if cols:
+            result[t] = {"columns": cols, "samples": samples, "rows": total}
+    return result
 
 def _build_dynamic_prompt(question: str, table_name: str) -> str:
     """
@@ -414,7 +496,6 @@ def _build_dynamic_prompt(question: str, table_name: str) -> str:
     """
     # Get everything in one DB connection
     columns, samples, total_rows = _get_schema_and_samples(table_name)
-
     if not columns:
         return None
 
@@ -445,13 +526,14 @@ def _build_dynamic_prompt(question: str, table_name: str) -> str:
     sample_lines = []
     for col_name, values in samples.items():
         sample_lines.append(f"  {col_name}: {', '.join(values)}")
-    
+
     # Dialect-aware syntax hints
     db_type = _get_db_type()
     if db_type == "postgres":
         syntax_rule = "- PostgreSQL syntax: LIMIT N (not TOP), NOW() (not GETDATE()), use double quotes \"column\" for identifiers. Column names are lowercase."
     else:
         syntax_rule = "- SQL Server syntax: TOP (not LIMIT), GETDATE(), DATEADD(), DATEPART()"
+
     # Build rules
     rules = [
         f"- Table: {table_name}",
@@ -483,7 +565,7 @@ def _build_dynamic_prompt(question: str, table_name: str) -> str:
             if 'sent' in val_lower:
                 rules.append(f"- 'successful'/'delivered' emails = {sc} = 'SENT'")
 
-    # Build 4-5 concise examples (not 8 — keeps prompt short)
+    # Build 4-5 concise examples
     examples = ["EXAMPLES:"]
     t = table_name
     id_col = col_names[0]
@@ -548,38 +630,170 @@ SQL:"""
     return prompt
 
 
+def _build_multi_table_prompt(question: str, table_names: list, category_name: str = "") -> str:
+    """
+    Build an AI prompt for a category (multiple related tables with FK relationships).
+    The AI is told which tables exist, their columns, and how they JOIN.
+    It decides whether to query one table or JOIN multiple based on the question.
+    """
+    if not table_names:
+        return None
+
+    # Read schema for all category tables
+    schemas = _get_multi_table_schema(table_names)
+    if not schemas:
+        return None
+
+    # Read FK relationships between these tables
+    fks = _get_foreign_keys(table_names)
+
+    db_type = _get_db_type()
+
+    # Build table descriptions
+    table_blocks = []
+    for tname, info in schemas.items():
+        col_lines = [f"  - {c[0]} ({c[1]})" for c in info["columns"]]
+        sample_lines = []
+        for col, vals in info["samples"].items():
+            if vals:
+                sample_lines.append(f"    {col}: {', '.join(vals[:5])}")
+        sample_block = "\n".join(sample_lines) if sample_lines else "    (none)"
+
+        table_blocks.append(
+            f"TABLE: {tname} ({info['rows']} rows)\n"
+            f"COLUMNS:\n" + "\n".join(col_lines) + "\n"
+            f"SAMPLE VALUES:\n{sample_block}"
+        )
+
+    # Build FK relationship block
+    if fks:
+        fk_lines = [
+            f"  - {fk['from_table']}.{fk['from_column']} = {fk['to_table']}.{fk['to_column']}"
+            for fk in fks
+        ]
+        fk_block = "RELATIONSHIPS (use for JOINs when question needs data from multiple tables):\n" + "\n".join(fk_lines)
+    else:
+        fk_block = "RELATIONSHIPS: (none — tables are independent)"
+
+    # Dialect-aware syntax
+    if db_type == "postgres":
+        syntax_rule = "- PostgreSQL syntax: LIMIT N (not TOP), NOW() (not GETDATE()), lowercase column names."
+    else:
+        syntax_rule = "- SQL Server syntax: TOP N (not LIMIT), GETDATE(), DATEADD()."
+
+    # Rules
+    rules = [
+        f"- Category: {category_name or 'multi-table'}",
+        f"- Tables available: {', '.join(schemas.keys())}",
+        "- Output ONLY SQL. No text. No markdown. No backticks.",
+        syntax_rule,
+        "- For single-table questions, query ONE table (simpler is better).",
+        "- For questions needing data from multiple tables, use INNER JOIN with the RELATIONSHIPS shown above.",
+        "- JOIN ALIAS RULE: each table must get a UNIQUE alias using first-letter-of-each-word. Example: CommunicationMaster→cm, CommunicationErrorMaster→cem, ApplicationMaster→am. NEVER use the same alias for two tables.",
+        "- NEVER invent column names. Only use columns listed in the TABLE blocks.",
+        "- For counting rows, use COUNT(*), NEVER COUNT(column_name).",
+    ]
+
+    # Choose a default anchor table for examples
+    anchor = next((t for t in schemas.keys() if "Master" in t and "Error" not in t), list(schemas.keys())[0])
+    anchor_cols = [c[0] for c in schemas[anchor]["columns"]]
+    top5 = ", ".join(anchor_cols[:5])
+
+    # Dialect-aware top-N syntax for examples
+    top_50 = "SELECT TOP 50" if db_type == "sqlserver" else "SELECT"
+    limit_50 = "" if db_type == "sqlserver" else " LIMIT 50"
+
+    # Build examples
+    examples = ["EXAMPLES:"]
+
+    # Example 1: single table
+    examples.append(f"Q: show records from {anchor}")
+    examples.append(f"SQL: {top_50} {top5} FROM {anchor}{limit_50}")
+    examples.append("")
+
+    # Example 2: JOIN using an FK (if any exist)
+    if fks:
+        fk0 = fks[0]
+        fr, ft = fk0["from_table"], fk0["to_table"]
+        fc, tc = fk0["from_column"], fk0["to_column"]
+        def _alias(tname):
+            return "".join(c.lower() for c in tname if c.isupper()) or tname[:2].lower()
+        fr_alias = _alias(fr)
+        ft_alias = _alias(ft)
+        if fr_alias == ft_alias:
+            ft_alias = ft_alias + "2"
+        examples.append(f"Q: {fr} joined with {ft}")
+        examples.append(
+            f"SQL: {top_50} {fr_alias}.*, {ft_alias}.* FROM {fr} {fr_alias} "
+            f"INNER JOIN {ft} {ft_alias} ON {fr_alias}.{fc} = {ft_alias}.{tc}{limit_50}"
+        )
+        examples.append("")
+
+    # Assemble full prompt
+    prompt = f"""You are a SQL query generator for a multi-table category. Output ONLY raw SQL.
+
+{chr(10) + chr(10).join(table_blocks)}
+
+{fk_block}
+
+RULES:
+{chr(10).join(rules)}
+
+{chr(10).join(examples)}
+
+Question: {question}
+SQL:"""
+
+    return prompt
+
+
 # ═══════════════════════════════════════════════════════════════
 # TOOL 4: generate_sql (FULLY DYNAMIC PROMPT)
 # ═══════════════════════════════════════════════════════════════
 
 @mcp.tool()
-def generate_sql(question: str, schema_text: str = "", table_name: str = "") -> str:
+def generate_sql(
+    question: str,
+    schema_text: str = "",
+    table_name: str = "",
+    category_tables: str = "",
+    category_name: str = "",
+) -> str:
+
     """
     Generate a SQL query from a natural language question.
-    Prompt is built dynamically from live database schema.
+
+    Two modes:
+      - Single-table (legacy): pass table_name, category_tables empty
+      - Category (new): pass category_tables="tbl1,tbl2,tbl3", table_name empty
 
     Args:
         question: Natural language question
-        schema_text: Optional. If empty, reads live from DB.
-        table_name: Optional. Which table to query. If empty, auto-detects.
+        schema_text: Optional. Kept for backward compat.
+        table_name: Single-table mode: which table to query
+        category_tables: Category mode: comma-separated list of tables
+        category_name: Category mode: human-readable category name for prompt
     """
-    # Use provided table_name, or auto-detect
-    if table_name:
-        target_table = table_name
+    # Category mode takes priority if provided
+    if category_tables:
+        tables = [t.strip() for t in category_tables.split(",") if t.strip()]
+        prompt = _build_multi_table_prompt(question, tables, category_name)
     else:
-        tables = _get_table_names()
-        skip_tables = {'users', 'users_v2', 'roles', 'token',
-                       'accesslog', 'sysdiagrams'}
-        target_table = None
-        for t in tables:
-            if t.lower() not in skip_tables:
-                target_table = t
-                break
-        if not target_table:
-            target_table = tables[0] if tables else "CommunicationsRequestStatus"
-
-    # Build prompt dynamically
-    prompt = _build_dynamic_prompt(question, target_table)
+        # Single-table mode (unchanged existing behavior)
+        if table_name:
+            target_table = table_name
+        else:
+            all_tables = _get_table_names()
+            skip_tables = {'users', 'users_v2', 'roles', 'token',
+                           'accesslog', 'sysdiagrams'}
+            target_table = None
+            for t in all_tables:
+                if t.lower() not in skip_tables:
+                    target_table = t
+                    break
+            if not target_table:
+                target_table = all_tables[0] if all_tables else "CommunicationMaster"
+        prompt = _build_dynamic_prompt(question, target_table)
 
     if not prompt:
         return "Could not read schema. Is the database connected?"

@@ -11,6 +11,34 @@
       "trusted_connection": "yes",
       "username": "",
       "password": "",
+      "default_table": "CommunicationMaster",
+      "tables": {
+        "CommunicationMaster": {
+          "label": "Communications",
+          "description": "Email and SMS communications sent to clients",
+          "access": "all"
+        },
+        "CommunicationErrorMaster": {
+          "label": "Communication Errors",
+          "description": "Error details for failed communications",
+          "access": "all"
+        },
+        "ApplicationMaster": {
+          "label": "Applications",
+          "description": "Registered applications (APP001, APP002)",
+          "access": "all"
+        },
+        "QueryLog": {
+          "label": "Query Logs",
+          "description": "History of all queries executed",
+          "access": "admin"
+        },
+        "ErrorLog": {
+          "label": "Error Logs",
+          "description": "Application errors and exceptions",
+          "access": "admin"
+        }
+      },
       "categories": {
         "Communications": {
           "description": "Communications, errors, and applications",
@@ -20,7 +48,7 @@
         }
       }
     },
-"anandrathi_trading": {
+    "anandrathi_trading": {
       "label": "Trading",
       "description": "Stock trading & portfolio management (PostgreSQL)",
       "db_type": "postgres",
@@ -29,6 +57,14 @@
       "database": "anandrathi_trading",
       "username": "postgres",
       "password": "root",
+      "default_table": "tradehistory",
+      "tables": {
+        "tradehistory": {
+          "label": "Trade History",
+          "description": "Stock trades, orders, and settlements",
+          "access": "all"
+        }
+      },
       "categories": {
         "Trading": {
           "description": "Stock trades and settlements",

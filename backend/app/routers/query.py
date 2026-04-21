@@ -19,17 +19,11 @@ from app.services.mcp_client import (
     mcp_bridge, get_available_databases, get_allowed_tables,
     get_default_table, DEFAULT_DATABASE, DATABASES,
 )
-from app.services.nlq_engine import (
-    match_template, validate_sql, inject_access_filter,
-    execute_query_safe, get_live_schema,
-)
+from app.services.nlq_engine import get_live_schema
 from app.services.database import execute_non_query
 from app.services.error_logger import log_error
 
 router = APIRouter(prefix="/api/v1/query", tags=["Query"])
-
-ENABLE_TEMPLATE_CACHE = True
-
 
 # ═══════════════════════════════════════════════════════════════
 # PYDANTIC MODELS
@@ -39,6 +33,7 @@ class QueryRequest(BaseModel):
     question: str
     table_name: Optional[str] = None
     database: Optional[str] = None
+    category: Optional[str] = None
 
 
 class QueryResponse(BaseModel):
@@ -79,22 +74,6 @@ class TableInfo(BaseModel):
 class TablesResponse(BaseModel):
     tables: List[TableInfo]
     default: str
-
-
-# ═══════════════════════════════════════════════════════════════
-# HELPER: Build access filter
-# ═══════════════════════════════════════════════════════════════
-
-def _build_access_filter(user: dict) -> str:
-    role = user.get("role", "")
-    app_id = user.get("application_id")
-    if role == "Admin":
-        return ""
-    elif app_id and role in ("RM_Head", "RM", "RM_Head2", "RM2", "RM3"):
-        return f"ReferenceApplicationId = {app_id}"
-    else:
-        username = user.get("username", "")
-        return f"Receiver LIKE '%{username}%'"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -169,8 +148,34 @@ async def natural_language_query(
         'alter table', 'insert into', 'update set',
         'create table', 'grant', 'revoke',
     ]
+    DATA_INTENT_KEYWORDS = [
+        # Interrogative / instruction verbs
+        'how', 'what', 'which', 'where', 'when', 'who',
+        'show', 'list', 'find', 'display', 'give',
+        'count', 'total', 'sum', 'average', 'avg', 'max', 'min',
+        'top', 'bottom', 'first', 'last',
+        'compare', 'rank', 'group',
+        # Data nouns
+        'row', 'record', 'entry', 'entries', 'data',
+        'communication', 'communications', 'message', 'messages',
+        'email', 'emails', 'sms', 'sent', 'receiver', 'recipient',
+        'status', 'failed', 'success', 'dropped', 'bounce', 'duplicate',
+        'trade', 'trades', 'stock', 'broker', 'client', 'application',
+        'user', 'users', 'date', 'today', 'yesterday', 'week', 'month',
+        # Question keywords common in NL queries
+        'percentage', 'percent', 'ratio', 'distribution',
+    ]
     question_lower = question.lower()
     for keyword in DANGEROUS_INTENT_KEYWORDS:
+        if not any(kw in question_lower for kw in DATA_INTENT_KEYWORDS):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This looks like a general question, not a data query. "
+                    "Try asking things like 'how many communications', "
+                    "'show failed messages', or 'top 10 clients by volume'."
+                )
+            )
         if keyword in question_lower:
             raise HTTPException(
                 status_code=400,
@@ -181,51 +186,14 @@ async def natural_language_query(
             )
         
     start_time = time.time()
-    access_filter = _build_access_filter(user)
 
     try:
-        # Template cache only for default database + default table
-        if (ENABLE_TEMPLATE_CACHE
-            and database == DEFAULT_DATABASE
-            and table_name == "CommunicationsRequestStatus"):
-
-            sql, description = match_template(question, access_filter)
-            if sql is not None:
-                is_valid, reason = validate_sql(sql)
-                if is_valid:
-                    sql = inject_access_filter(sql, access_filter)
-                    data, columns, error = execute_query_safe(sql)
-                    elapsed = int((time.time() - start_time) * 1000)
-
-                    insights = []
-                    if len(data) == 0:
-                        insights.append("No records found.")
-                    else:
-                        insights.append(f"Found {len(data)} records.")
-                    insights.append(f"Instant match: {description}")
-
-                    result = {
-                        "question": question,
-                        "generated_sql": sql,
-                        "method": "template",
-                        "data": data,
-                        "columns": columns,
-                        "row_count": len(data),
-                        "total_rows": len(data),
-                        "truncated": False,
-                        "execution_time_ms": elapsed,
-                        "insights": insights,
-                        "error": error,
-                    }
-
-                    _log_query(user, question, result)
-                    return result
-
         # PRIMARY: MCP Bridge (AI-powered)
         result = await mcp_bridge.ask_question(
             question, user,
-            table_name=table_name,
+            table_name=request.table_name,
             database=database,
+            category=request.category,
         )
 
         _log_query(user, question, result)
@@ -350,3 +318,47 @@ async def export_csv(
             "X-Truncated": "true" if truncated else "false",
         },
     )
+
+
+# ═══════════════════════════════════════════════════════════════
+# GET /api/v1/query/categories — List categories for a database
+# ═══════════════════════════════════════════════════════════════
+
+class CategoryInfo(BaseModel):
+    category: str
+    description: str
+    tables: List[str]
+    default_table: str
+
+
+class CategoriesResponse(BaseModel):
+    categories: List[CategoryInfo]
+    default: Optional[str]
+
+
+@router.get("/categories", response_model=CategoriesResponse)
+async def list_categories(
+    database: str = QueryParam(default=None),
+    user: dict = Depends(get_current_user),
+):
+    """
+    Returns categories defined for the selected database.
+    A category groups related tables (e.g., Communications: CommunicationMaster
+    + CommunicationErrorMaster + ApplicationMaster) that should be queried
+    together with FK-aware JOINs.
+    """
+    db = database or DEFAULT_DATABASE
+    db_cfg = DATABASES.get(db, {})
+    cats_cfg = db_cfg.get("categories", {}) or {}
+
+    categories = []
+    for cat_name, cat_info in cats_cfg.items():
+        categories.append(CategoryInfo(
+            category=cat_name,
+            description=cat_info.get("description", ""),
+            tables=cat_info.get("tables", []),
+            default_table=cat_info.get("default_table", ""),
+        ))
+
+    default_cat = next(iter(cats_cfg.keys()), None) if cats_cfg else None
+    return CategoriesResponse(categories=categories, default=default_cat)

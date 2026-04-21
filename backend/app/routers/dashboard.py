@@ -27,6 +27,7 @@ from fastapi import APIRouter, Depends, Query
 from app.middleware.auth_middleware import get_current_user
 from app.services.database import get_db_connection
 from app.services.error_logger import log_error
+from app.services.access_control import build_app_filter
 from app.models.dashboard import (
     DashboardStats, StatusChartResponse, ChartDataPoint,
     TrendChartResponse, TrendDataPoint,
@@ -43,25 +44,15 @@ router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
 
 def build_access_filter(user: dict) -> str:
     """
-    Build a SQL WHERE clause based on the user's role and application_id.
-    This is the KEY security mechanism - data is filtered at the SQL level.
-
-    Admin       -> no filter (sees everything)
-    RM / Head   -> WHERE ApplicationId = {application_id}
-    Client      -> WHERE SentTo LIKE '%{username}%'
+    Build a SQL WHERE clause based on ApplicationAccessMaster.
+    Admin + no access rows → no filter (sees all).
+    Has access rows        → filter by those ApplicationIds.
+    Non-admin + no rows    → blocked (sees nothing, fail-safe).
     """
-    role = user.get("role", "")
-
-    if role == "Admin":
-        return ""
-
-    app_id = user.get("application_id")
-    if app_id and role in ("RM_Head", "RM", "RM_Head2", "RM2", "RM3"):
-        return f"WHERE ApplicationId = {app_id}"
-
-    # Client - can only see their own communications
-    username = user.get("username", "")
-    return f"WHERE SentTo LIKE '%{username}%'"
+    filter_sql, scope = build_app_filter(user, column="ApplicationId")
+    if not filter_sql:
+        return ""  # admin bypass
+    return f"WHERE {filter_sql}"
 
 
 def add_and_clause(base_filter: str, condition: str) -> str:
