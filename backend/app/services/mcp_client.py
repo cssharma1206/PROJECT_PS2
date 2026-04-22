@@ -23,8 +23,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from app.services.error_logger import log_error
-from app.services.access_control import build_app_filter
-
+from app.services.access_control import build_app_filter, inject_access_into_sql
 
 MCP_SERVER_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -251,10 +250,19 @@ class MCPBridge:
                     f"Could not generate SQL. AI returned: {sql_text}"
                 )
 
-            # Step 3: Inject access control (only for Communications main table)
-            # Step 3: Inject access control (only for Communications main table)
-            if user and database == "anandrathi" and table_name == "CommunicationMaster":
-                generated_sql = self._inject_access_filter(generated_sql, user, database=database)
+            # Step 3: Inject access control
+            if user and database == "anandrathi":
+                if category and category_tables:
+                    # Category mode: use regex-based injection (handles JOINs)
+                    modified_sql, err = inject_access_into_sql(generated_sql, user)
+                    if err:
+                        # Fail-closed: reject query
+                        elapsed = int((time.time() - start_time) * 1000)
+                        return self._error_response(question, elapsed, err)
+                    generated_sql = modified_sql
+                elif table_name == "CommunicationMaster":
+                    # Single-table legacy path (unchanged)
+                    generated_sql = self._inject_access_filter(generated_sql, user, database=database)
 
             # Step 4: Execute SQL
             exec_text = execute_query(generated_sql)

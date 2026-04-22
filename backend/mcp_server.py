@@ -692,6 +692,9 @@ def _build_multi_table_prompt(question: str, table_names: list, category_name: s
         "- JOIN ALIAS RULE: each table must get a UNIQUE alias using first-letter-of-each-word. Example: CommunicationMaster→cm, CommunicationErrorMaster→cem, ApplicationMaster→am. NEVER use the same alias for two tables.",
         "- NEVER invent column names. Only use columns listed in the TABLE blocks.",
         "- For counting rows, use COUNT(*), NEVER COUNT(column_name).",
+        "- NEVER use TOP/LIMIT when the query has GROUP BY — GROUP BY may produce multiple rows and TOP truncates them.",
+        "- When grouping, ALWAYS include the grouping column in SELECT so results are readable (e.g., SELECT am.ApplicationName, COUNT(*) FROM ...).",
+        "- Only use TOP N for listing/ranking queries without GROUP BY, like 'show top 10 recipients'.",
     ]
 
     # Choose a default anchor table for examples
@@ -727,7 +730,29 @@ def _build_multi_table_prompt(question: str, table_names: list, category_name: s
             f"SQL: {top_50} {fr_alias}.*, {ft_alias}.* FROM {fr} {fr_alias} "
             f"INNER JOIN {ft} {ft_alias} ON {fr_alias}.{fc} = {ft_alias}.{tc}{limit_50}"
         )
+        
+        # Example 3: GROUP BY aggregation (no TOP when grouping)
+    if fks and db_type == "sqlserver":
+        # Find a good grouping target: ApplicationMaster has ApplicationName we want
+        am_table = next((t for t in schemas.keys() if "Application" in t and "Access" not in t and "Error" not in t), None)
+        if am_table:
+            am_alias = _alias(am_table)
+            # Find the FK that connects to this ApplicationMaster
+            fk_to_am = next((fk for fk in fks if fk["to_table"] == am_table), None)
+            if fk_to_am:
+                other_table = fk_to_am["from_table"]
+                other_alias = _alias(other_table)
+                if other_alias == am_alias:
+                    other_alias = other_alias + "2"
+                examples.append(f"Q: count per application")
+                examples.append(
+                    f"SQL: SELECT {am_alias}.ApplicationName, COUNT(*) AS Total "
+                    f"FROM {other_table} {other_alias} "
+                    f"INNER JOIN {am_table} {am_alias} ON {other_alias}.{fk_to_am['from_column']} = {am_alias}.{fk_to_am['to_column']} "
+                    f"GROUP BY {am_alias}.ApplicationName"
+                )
         examples.append("")
+        
 
     # Assemble full prompt
     prompt = f"""You are a SQL query generator for a multi-table category. Output ONLY raw SQL.

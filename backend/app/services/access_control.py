@@ -84,3 +84,101 @@ def build_app_filter(user: dict, column: str = "ApplicationId") -> Tuple[str, st
 
     # Non-admin with no access rows = misconfigured, fail safe
     return "1=0", "blocked"
+
+import re
+
+# Tables that have an app-access column, with the column name per table
+ACCESS_RELEVANT_TABLES = {
+    "CommunicationMaster": "ApplicationId",
+    "CommunicationErrorMaster": "AppId",
+    "ApplicationMaster": "AppId",
+}
+
+
+def inject_access_into_sql(sql: str, user: dict) -> tuple:
+    """
+    Inject an access filter into generated SQL for category mode.
+
+    Returns (modified_sql, error_or_none).
+    - If user is admin with full access: returns (sql, None) unchanged
+    - If SQL references an access-relevant table: injects filter, returns (modified_sql, None)
+    - If SQL cannot be safely filtered: returns (None, error_message) — fail-closed
+
+    Strategy: find the first access-relevant table in the FROM/JOIN clauses,
+    extract its alias, and inject <alias>.<col> IN (...) into the WHERE clause.
+    """
+    allowed_ids = get_allowed_app_ids(user.get("user_id"))
+
+    # Admin or full-access → no-op
+    if not allowed_ids and user.get("role") == "Admin":
+        return sql, None
+
+    # Non-admin with no access → fail-closed (shouldn't happen, but belt + suspenders)
+    if not allowed_ids:
+        return None, "User has no application access."
+
+    # Build the IN clause
+    ids_list = ",".join(str(x) for x in allowed_ids)
+
+    # Find first access-relevant table in FROM or JOIN clause, get its alias
+    # Match both "FROM TableName alias" and "JOIN TableName alias"
+    found_table = None
+    found_alias = None
+
+    for table, col in ACCESS_RELEVANT_TABLES.items():
+        # Regex: (FROM|JOIN)\s+TableName\s+(alias)?  — alias is optional
+        pattern = rf"\b(?:FROM|JOIN)\s+{re.escape(table)}\s+(\w+)"
+        m = re.search(pattern, sql, re.IGNORECASE)
+        if m:
+            found_table = table
+            found_alias = m.group(1)
+            break
+        # Try without alias: FROM TableName (end or followed by keyword)
+        pattern_noalias = rf"\b(?:FROM|JOIN)\s+{re.escape(table)}\b(?!\s+\w)"
+        m2 = re.search(pattern_noalias, sql, re.IGNORECASE)
+        if m2:
+            found_table = table
+            found_alias = table  # use full table name as alias prefix
+            break
+
+    if not found_table:
+        return None, (
+            "Access filter could not be applied: no access-controlled table "
+            "found in query. Query rejected for safety."
+        )
+
+    col = ACCESS_RELEVANT_TABLES[found_table]
+    filter_clause = f"{found_alias}.{col} IN ({ids_list})"
+
+    # Inject into WHERE clause
+    # Case 1: has WHERE already — append AND before GROUP BY / ORDER BY / end
+    # Case 2: no WHERE — insert WHERE before GROUP BY / ORDER BY / end
+    has_where = re.search(r"\bWHERE\b", sql, re.IGNORECASE)
+
+    if has_where:
+        # Find end of WHERE clause: before GROUP BY, ORDER BY, HAVING, or end
+        # Split at the first occurrence of any of these keywords
+        split_match = re.search(
+            r"\b(GROUP\s+BY|ORDER\s+BY|HAVING)\b",
+            sql, re.IGNORECASE
+        )
+        if split_match:
+            before = sql[:split_match.start()].rstrip()
+            after = sql[split_match.start():]
+            modified_sql = f"{before} AND {filter_clause} {after}"
+        else:
+            modified_sql = f"{sql.rstrip().rstrip(';')} AND {filter_clause}"
+    else:
+        # No WHERE — insert WHERE before GROUP BY / ORDER BY, or at end
+        split_match = re.search(
+            r"\b(GROUP\s+BY|ORDER\s+BY|HAVING)\b",
+            sql, re.IGNORECASE
+        )
+        if split_match:
+            before = sql[:split_match.start()].rstrip()
+            after = sql[split_match.start():]
+            modified_sql = f"{before} WHERE {filter_clause} {after}"
+        else:
+            modified_sql = f"{sql.rstrip().rstrip(';')} WHERE {filter_clause}"
+
+    return modified_sql, None

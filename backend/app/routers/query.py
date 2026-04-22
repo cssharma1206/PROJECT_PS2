@@ -151,17 +151,21 @@ async def natural_language_query(
     DATA_INTENT_KEYWORDS = [
         # Interrogative / instruction verbs
         'how', 'what', 'which', 'where', 'when', 'who',
-        'show', 'list', 'find', 'display', 'give',
+        'show', 'list', 'find', 'display', 'give', 'tell',
         'count', 'total', 'sum', 'average', 'avg', 'max', 'min',
         'top', 'bottom', 'first', 'last',
         'compare', 'rank', 'group',
         # Data nouns
-        'row', 'record', 'entry', 'entries', 'data',
+        'row', 'record', 'entry', 'entries', 'data', 'table',
         'communication', 'communications', 'message', 'messages',
-        'email', 'emails', 'sms', 'sent', 'receiver', 'recipient',
-        'status', 'failed', 'success', 'dropped', 'bounce', 'duplicate',
-        'trade', 'trades', 'stock', 'broker', 'client', 'application',
-        'user', 'users', 'date', 'today', 'yesterday', 'week', 'month',
+        'email', 'emails', 'sms', 'sent', 'receiver', 'recipient', 'sender',
+        'status', 'failed', 'success', 'succeeded', 'dropped', 'bounce', 'bounced',
+        'duplicate', 'error', 'errors',
+        'trade', 'trades', 'stock', 'broker', 'client', 'clients',
+        'application', 'applications', 'app',
+        'user', 'users',
+        'date', 'today', 'yesterday', 'week', 'month', 'year',
+        'percentage', 'percent', 'ratio', 'distribution', 'volume',
         # Question keywords common in NL queries
         'percentage', 'percent', 'ratio', 'distribution',
     ]

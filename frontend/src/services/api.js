@@ -56,11 +56,11 @@ export const dashboardAPI = {
 };
 
 export const queryAPI = {
-  ask: (question, table_name = null, database = null) =>
-    api.post('/query', { question, table_name, database }),
+  ask: (question, database = null, category = null) =>
+    api.post('/query', { question, database, category }),
   databases: () => api.get('/query/databases'),
-  tables: (database = null) =>
-    api.get('/query/tables', { params: database ? { database } : {} }),
+  categories: (database = null) =>
+    api.get('/query/categories', { params: database ? { database } : {} }),
   history: (page = 1, limit = 20) =>
     api.get(`/query/history?page=${page}&limit=${limit}`),
   exportCSV: (sql, database) =>

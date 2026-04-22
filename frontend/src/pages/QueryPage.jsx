@@ -5,7 +5,7 @@ import { Send, Database, Clock, Download, AlertCircle, Loader, Trash2, ChevronDo
 
 const STORAGE_KEY = 'query_chat_messages';
 const DB_KEY = 'query_selected_db';
-const TABLE_KEY = 'query_selected_table';
+const CATEGORY_KEY = 'query_selected_category';
 
 export default function QueryPage() {
   const { user } = useAuth();
@@ -17,9 +17,9 @@ export default function QueryPage() {
 
   // Database & table state
   const [databases, setDatabases] = useState([]);
-  const [tables, setTables] = useState([]);
+  const [categories, setCategories] = useState([]);
   const [selectedDb, setSelectedDb] = useState(() => sessionStorage.getItem(DB_KEY) || '');
-  const [selectedTable, setSelectedTable] = useState(() => sessionStorage.getItem(TABLE_KEY) || '');
+  const [selectedCategory, setSelectedCategory] = useState(() => sessionStorage.getItem(CATEGORY_KEY) || '');
 
   // Chat messages
   const [messages, setMessages] = useState(() => {
@@ -48,20 +48,17 @@ export default function QueryPage() {
     });
   }, []);
 
-  // Fetch tables when database changes
+  // Fetch categories when database changes
   useEffect(() => {
     if (!selectedDb) return;
-    queryAPI.tables(selectedDb).then((res) => {
-      setTables(res.data.tables);
-      // Auto-select default table for this database
-      const currentTableExists = res.data.tables.some(t => t.table_name === selectedTable);
-      if (!currentTableExists) {
-        setSelectedTable(res.data.default);
-        sessionStorage.setItem(TABLE_KEY, res.data.default);
+    queryAPI.categories(selectedDb).then((res) => {
+      setCategories(res.data.categories);
+      const currentExists = res.data.categories.some(c => c.category === selectedCategory);
+      if (!currentExists && res.data.default) {
+        setSelectedCategory(res.data.default);
+        sessionStorage.setItem(CATEGORY_KEY, res.data.default);
       }
-    }).catch(() => {
-      setTables([]);
-    });
+    }).catch(() => setCategories([]));
   }, [selectedDb]);
 
   // Auto-scroll
@@ -71,9 +68,6 @@ export default function QueryPage() {
 
   // Dynamic suggestions based on selected database
   const getSuggestions = () => {
-    const dbLabel = databases.find(d => d.database === selectedDb)?.label || '';
-    const tblLabel = tables.find(t => t.table_name === selectedTable)?.label || '';
-
     if (selectedDb === 'anandrathi_trading') {
       return [
         'Which stock was traded most?',
@@ -85,16 +79,16 @@ export default function QueryPage() {
         'Which broker handles most trades?',
         'Show pending trades',
       ];
-    } else if (selectedTable === 'QueryLog') {
-      return ['Show last 20 queries', 'How many queries were successful', 'Which method is used most', 'Show failed queries'];
-    } else if (selectedTable === 'ErrorLog') {
-      return ['Show recent errors', 'How many errors today', 'Most common error types', 'Errors in the last 7 days'];
     }
     return [
-      'Show status summary', 'How many emails failed?', 'Show vendor ranking by failures',
-      'What percentage of emails failed', 'Show daily trend for last 7 days',
-      'How many emails have null in BccData', 'Show emails submitted on weekends',
-      'Top 10 clients by email volume',
+      'How many communications were sent',
+      'Show status distribution',
+      'How many errors per application',
+      'Which application has the most failures',
+      'Top 10 recipients by message volume',
+      'How many SMS vs EMAIL were sent',
+      'Show recent errors',
+      'How many communications failed this week',
     ];
   };
 
@@ -102,16 +96,15 @@ export default function QueryPage() {
     const newDb = e.target.value;
     setSelectedDb(newDb);
     sessionStorage.setItem(DB_KEY, newDb);
-    // Clear chat and table selection when switching databases
     setMessages([]);
     sessionStorage.removeItem(STORAGE_KEY);
-    setSelectedTable(''); // Will be auto-set by the useEffect above
+    sessionStorage.removeItem(CATEGORY_KEY);  // was TABLE_KEY
   };
 
-  const handleTableChange = (e) => {
-    const newTable = e.target.value;
-    setSelectedTable(newTable);
-    sessionStorage.setItem(TABLE_KEY, newTable);
+  const handleCategoryChange = (e) => {
+    const newCat = e.target.value;
+    setSelectedCategory(newCat);
+    sessionStorage.setItem(CATEGORY_KEY, newCat);
     setMessages([]);
     sessionStorage.removeItem(STORAGE_KEY);
   };
@@ -126,7 +119,7 @@ export default function QueryPage() {
     setLoading(true);
 
     try {
-      const res = await queryAPI.ask(q, selectedTable, selectedDb);
+      const res = await queryAPI.ask(q, selectedDb, selectedCategory);
       const data = res.data;
       setMessages((prev) => [...prev, { role: 'assistant', content: data, timestamp: new Date().toLocaleTimeString() }]);
     } catch (err) {
@@ -165,10 +158,7 @@ export default function QueryPage() {
     }
   };
 
-  const currentDbLabel = databases.find(d => d.database === selectedDb)?.label || selectedDb;
-  const currentTableLabel = tables.find(t => t.table_name === selectedTable)?.label || selectedTable;
-  const isDefaultDb = selectedDb === 'anandrathi';
-  const isDefaultTable = selectedTable === 'CommunicationsRequestStatus';
+  const currentDbLabel = databases.find(d => d.database === selectedDb)?.label || selectedDb; 
 
   return (
     <div style={s.container}>
@@ -192,13 +182,13 @@ export default function QueryPage() {
           </div>
         )}
 
-        {/* Table Selector */}
-        {tables.length > 1 && (
+        {/* Category Selector */}
+        {categories.length > 0 && (
           <div style={s.selector}>
             <Database size={14} color="#5A6577" />
-            <select style={s.dropdown} value={selectedTable} onChange={handleTableChange}>
-              {tables.map((t) => (
-                <option key={t.table_name} value={t.table_name}>{t.label}</option>
+            <select style={s.dropdown} value={selectedCategory} onChange={handleCategoryChange}>
+              {categories.map((c) => (
+                <option key={c.category} value={c.category}>{c.category}</option>
               ))}
             </select>
             <ChevronDown size={14} color="#5A6577" style={{ pointerEvents: 'none', marginLeft: -24 }} />
@@ -213,15 +203,14 @@ export default function QueryPage() {
       </div>
 
       {/* Context banner */}
-      {(!isDefaultDb || !isDefaultTable) && (
-        <div style={s.contextBanner}>
-          <Server size={14} />
-          <span>
-            Querying: <strong>{currentDbLabel}</strong>
-            {tables.length > 1 && <> → <strong>{currentTableLabel}</strong></>}
-          </span>
-        </div>
-      )}
+{selectedCategory && (
+  <div style={s.contextBanner}>
+    <Server size={14} />
+    <span>
+      Querying: <strong>{currentDbLabel}</strong> → <strong>{selectedCategory}</strong>
+    </span>
+  </div>
+)}
 
       {/* Chat Area */}
       <div style={s.chatArea}>
@@ -230,9 +219,7 @@ export default function QueryPage() {
             <Database size={40} color="#D0D5DD" />
             <h3 style={s.emptyTitle}>Ask your data anything</h3>
             <p style={s.emptyText}>
-              {isDefaultDb
-                ? 'Type a question in natural language and the AI will generate SQL and fetch results.'
-                : `You are querying the ${currentDbLabel} database. Ask any question about this data.`}
+              Type a question in natural language and the AI will generate SQL and fetch results.
             </p>
             <div style={s.suggestGrid}>
               {getSuggestions().map((sg) => (
@@ -335,7 +322,7 @@ export default function QueryPage() {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder={`Ask about ${currentDbLabel}${!isDefaultTable ? ' → ' + currentTableLabel : ''}...`}
+          placeholder={`Ask about ${currentDbLabel}${selectedCategory ? ' → ' + selectedCategory : ''}...`}
           disabled={loading}
         />
         <button style={s.sendBtn} onClick={() => handleSend()} disabled={loading || !input.trim()}>
