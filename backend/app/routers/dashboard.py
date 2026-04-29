@@ -25,15 +25,16 @@ ALL endpoints are filtered by the user's role:
 
 from fastapi import APIRouter, Depends, Query
 from app.middleware.auth_middleware import get_current_user
-from app.services.database import get_db_connection
+from app.services.database import get_db_connection, get_trading_db_connection
 from app.services.error_logger import log_error
 from app.services.access_control import build_app_filter
 from app.models.dashboard import (
-    DashboardStats, StatusChartResponse, ChartDataPoint,
-    TrendChartResponse, TrendDataPoint,
-    VendorChartResponse, VendorDataPoint,
-    TopClientsResponse, TopClient,
-)
+        DashboardStats, StatusChartResponse, ChartDataPoint,
+        TrendChartResponse, TrendDataPoint,
+        VendorChartResponse, VendorDataPoint,
+        TopClientsResponse, TopClient,
+        TradingStats, TradeTypeBreakdown, TopSymbol,
+    )
 
 router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
 
@@ -291,5 +292,73 @@ def get_top_clients(
     except Exception as e:
         log_error("DASHBOARD_TOP_CLIENTS", str(e), user.get("user_id"), "/dashboard/top-clients")
         return TopClientsResponse(data=[])
+    finally:
+        conn.close()
+
+
+@router.get("/trading-stats", response_model=TradingStats)
+def get_trading_stats(user: dict = Depends(get_current_user)):
+    """
+    Returns aggregated KPIs from the anandrathi_trading PostgreSQL DB.
+    All five KPIs are fetched in a single endpoint call to minimise
+    round trips from the frontend.
+    """
+    try:
+        conn = get_trading_db_connection()
+    except Exception as e:
+        log_error("DASHBOARD_TRADING_CONN", str(e), user.get("user_id"), "/dashboard/trading-stats")
+        return TradingStats()
+ 
+    try:
+        cursor = conn.cursor()
+ 
+        # Total trades
+        cursor.execute("SELECT COUNT(*) FROM tradehistory")
+        total_trades = cursor.fetchone()[0] or 0
+ 
+        # Total value + average trade size (one query, two aggregates)
+        cursor.execute("SELECT COALESCE(SUM(tradevalue), 0), COALESCE(AVG(tradevalue), 0) FROM tradehistory")
+        row = cursor.fetchone()
+        total_value = float(row[0]) if row else 0.0
+        avg_trade_size = float(row[1]) if row else 0.0
+ 
+        # BUY vs SELL split
+        cursor.execute("""
+            SELECT tradetype, COUNT(*) AS cnt
+            FROM tradehistory
+            GROUP BY tradetype
+            ORDER BY cnt DESC
+        """)
+        by_type = [
+            TradeTypeBreakdown(trade_type=row[0], count=row[1])
+            for row in cursor.fetchall()
+        ]
+ 
+        # Top 5 symbols by trade count
+        cursor.execute("""
+            SELECT stocksymbol, COUNT(*) AS cnt
+            FROM tradehistory
+            GROUP BY stocksymbol
+            ORDER BY cnt DESC
+            LIMIT 5
+        """)
+        top_symbols = [
+            TopSymbol(symbol=row[0], count=row[1])
+            for row in cursor.fetchall()
+        ]
+ 
+        cursor.close()
+ 
+        return TradingStats(
+            total_trades=total_trades,
+            total_value=round(total_value, 2),
+            avg_trade_size=round(avg_trade_size, 2),
+            by_type=by_type,
+            top_symbols=top_symbols,
+        )
+ 
+    except Exception as e:
+        log_error("DASHBOARD_TRADING_STATS", str(e), user.get("user_id"), "/dashboard/trading-stats")
+        return TradingStats()
     finally:
         conn.close()

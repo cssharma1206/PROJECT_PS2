@@ -130,3 +130,24 @@ class ErrorLogItem(BaseModel):
 class ErrorLogResponse(BaseModel):
     errors: List[ErrorLogItem]
     total: int
+
+
+# ─── Trading Dashboard Models ────────────────────────────────────────────
+ 
+class TradeTypeBreakdown(BaseModel):
+    """One row of BUY vs SELL split."""
+    trade_type: str       # "BUY" or "SELL"
+    count: int
+ 
+class TopSymbol(BaseModel):
+    """One row of top traded symbols."""
+    symbol: str
+    count: int
+ 
+class TradingStats(BaseModel):
+    """All Trading dashboard KPIs in one payload."""
+    total_trades: int = 0
+    total_value: float = 0.0
+    avg_trade_size: float = 0.0
+    by_type: list[TradeTypeBreakdown] = []
+    top_symbols: list[TopSymbol] = []

@@ -39,8 +39,8 @@ REFRESH_TOKEN_EXPIRE_DAYS = 7
 # APP CONFIGURATION
 # ═══════════════════════════════════════════════════════════════
 APP_TITLE = "Anand Rathi - Communications Intelligence Platform"
-APP_VERSION = "2.0.0"
-APP_DESCRIPTION = "Phase 2: Service-Oriented Architecture with REST APIs, MCP, and Dynamic Database Support"
+APP_VERSION = "1.0.0"
+APP_DESCRIPTION = "Category-mode NLQ with FK-aware multi-table JOINs, ApplicationAccessMaster authorization, and dynamic live-schema prompt building"
 API_PREFIX = "/api/v1"
 
 # CORS - allowed origins for frontend

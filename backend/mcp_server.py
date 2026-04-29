@@ -687,14 +687,20 @@ def _build_multi_table_prompt(question: str, table_names: list, category_name: s
         f"- Tables available: {', '.join(schemas.keys())}",
         "- Output ONLY SQL. No text. No markdown. No backticks.",
         syntax_rule,
-        "- For single-table questions, query ONE table (simpler is better).",
-        "- For questions needing data from multiple tables, use INNER JOIN with the RELATIONSHIPS shown above.",
+        "- DEFAULT TO ONE TABLE. Only use JOIN if the question explicitly asks for columns from a second table or asks to combine data across tables.",
+        "- DO NOT JOIN just because a foreign key exists. Foreign keys are listed for reference, not as instructions to join.",
+        "- WARNING: INNER JOIN with CommunicationErrorMaster will DROP ALL SUCCESS rows because errors only exist for failed messages. Never INNER JOIN error tables for questions about Status counts, ServiceType counts, or general message statistics — these need only CommunicationMaster.",
+        "- For questions like 'count by status', 'count by service type', 'how many messages', 'count of communications', or 'message distribution' — use ONLY CommunicationMaster. No JOIN.",
+        "- Only JOIN CommunicationErrorMaster when the question explicitly mentions errors, error types, error summaries, or asks to combine messages with their failure reasons.",
+        "- Only JOIN ApplicationMaster when the question asks for ApplicationName or ApplicationCode (not just ApplicationId).",
         "- JOIN ALIAS RULE: each table must get a UNIQUE alias using first-letter-of-each-word. Example: CommunicationMaster→cm, CommunicationErrorMaster→cem, ApplicationMaster→am. NEVER use the same alias for two tables.",
         "- NEVER invent column names. Only use columns listed in the TABLE blocks.",
         "- For counting rows, use COUNT(*), NEVER COUNT(column_name).",
         "- NEVER use TOP/LIMIT when the query has GROUP BY — GROUP BY may produce multiple rows and TOP truncates them.",
         "- When grouping, ALWAYS include the grouping column in SELECT so results are readable (e.g., SELECT am.ApplicationName, COUNT(*) FROM ...).",
         "- Only use TOP N for listing/ranking queries without GROUP BY, like 'show top 10 recipients'.",
+        "- CRITICAL: Status values like SUCCESS, FAILED, BOUNCE, DROPPED, DUPLICATE are columns in CommunicationMaster, NOT errors. Questions about message Status (including bounced, dropped, duplicate, failed messages) need ONLY CommunicationMaster. Do NOT JOIN CommunicationErrorMaster for Status questions.",
+        "- CommunicationErrorMaster contains ONLY rows where Status = 'FAILED'. It does NOT contain rows for BOUNCE, DROPPED, or DUPLICATE messages. JOINing with it for non-FAILED status questions returns ZERO rows.",
     ]
 
     # Choose a default anchor table for examples
