@@ -53,6 +53,7 @@ export const dashboardAPI = {
   trendChart: (days = 30) => api.get(`/dashboard/charts/trend?days=${days}`),
   vendorChart: () => api.get('/dashboard/charts/vendors'),
   topClients: (limit = 10) => api.get(`/dashboard/top-clients?limit=${limit}`),
+  tradingStats: () => api.get('/dashboard/trading-stats'),
 };
 
 export const queryAPI = {

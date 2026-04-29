@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from 'react';
 import { queryAPI } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { Send, Database, Clock, Download, AlertCircle, Loader, Trash2, ChevronDown, ChevronRight, Server } from 'lucide-react';
+import QueryChart from '../components/QueryChart';
+import { detectChart } from '../utils/chartDetector';
 
 const STORAGE_KEY = 'query_chat_messages';
 const DB_KEY = 'query_selected_db';
@@ -285,6 +287,12 @@ export default function QueryPage() {
                       </table>
                     </div>
                   )}
+                  {msg.content.data && msg.content.data.length > 0 && (() => {
+                    const chart = detectChart(msg.content.columns, msg.content.data);
+                    return chart ? (
+                    <QueryChart type={chart.type} config={chart.config} data={msg.content.data} />
+                  ) : null;
+                  })()}
                   {msg.content.generated_sql && msg.content.data && msg.content.data.length > 0 && (
                     <button
                       style={s.exportBtn}
