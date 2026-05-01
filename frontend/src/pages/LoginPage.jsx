@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
+import logoUrl from '../assets/logo_tar.jpg';
 
 export default function LoginPage() {
   const { login } = useAuth();
@@ -9,6 +10,7 @@ export default function LoginPage() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [focusedField, setFocusedField] = useState(null);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -26,10 +28,16 @@ export default function LoginPage() {
 
   return (
     <div style={styles.wrapper}>
+      <style>{`
+        @keyframes fadeUp {
+          from { opacity: 0; transform: translateY(12px); }
+          to   { opacity: 1; transform: translateY(0); }
+        }
+      `}</style>
+
       <div style={styles.card}>
         <div style={styles.logoSection}>
-          <div style={styles.logoIcon}>AR</div>
-          <h1 style={styles.title}>Anand Rathi</h1>
+          <img src={logoUrl} alt="Tech Anand Rathi" style={styles.logo} />
           <p style={styles.subtitle}>Communications Intelligence Platform</p>
         </div>
 
@@ -38,20 +46,30 @@ export default function LoginPage() {
 
           <label style={styles.label}>Username</label>
           <input
-            style={styles.input}
+            style={{
+              ...styles.input,
+              ...(focusedField === 'username' ? styles.inputFocused : {}),
+            }}
             type="text"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
+            onFocus={() => setFocusedField('username')}
+            onBlur={() => setFocusedField(null)}
             placeholder="Enter your username"
             required
           />
 
           <label style={styles.label}>Password</label>
           <input
-            style={styles.input}
+            style={{
+              ...styles.input,
+              ...(focusedField === 'password' ? styles.inputFocused : {}),
+            }}
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
+            onFocus={() => setFocusedField('password')}
+            onBlur={() => setFocusedField(null)}
             placeholder="Enter your password"
             required
           />
@@ -60,11 +78,6 @@ export default function LoginPage() {
             {loading ? 'Signing in...' : 'Sign In'}
           </button>
         </form>
-
-        <div style={styles.footer}>
-          <p style={styles.footerText}>Demo: admin / admin123</p>
-          <p style={styles.footerText}>RM: rm1 / rm123 | Client: client1 / client123</p>
-        </div>
       </div>
     </div>
   );
@@ -76,46 +89,38 @@ const styles = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    background: 'linear-gradient(135deg, #EEF2F7 0%, #F8FAFB 50%, #EBF0F5 100%)',
+    background:
+      'radial-gradient(circle at 85% 15%, #DDE8F5 0%, transparent 45%), ' +
+      'radial-gradient(circle at 10% 90%, #E5EDF3 0%, transparent 50%), ' +
+      'linear-gradient(135deg, #F1F5FA 0%, #F8FAFB 50%, #EEF2F7 100%)',
     fontFamily: "'DM Sans', -apple-system, sans-serif",
   },
   card: {
-    width: 400,
+    width: 420,
     background: '#FFFFFF',
     borderRadius: 16,
-    padding: '40px 36px',
-    boxShadow: '0 4px 24px rgba(15, 39, 68, 0.08)',
+    padding: '36px 36px 32px',
+    boxShadow: '0 8px 32px rgba(15, 39, 68, 0.10), 0 2px 8px rgba(15, 39, 68, 0.04)',
     border: '1px solid #E8ECF0',
+    animation: 'fadeUp 0.4s ease-out',
   },
   logoSection: {
     textAlign: 'center',
-    marginBottom: 32,
+    marginBottom: 28,
   },
-  logoIcon: {
-    width: 56,
-    height: 56,
-    borderRadius: 14,
-    background: '#0F2744',
-    color: '#FFFFFF',
-    fontSize: 20,
-    fontWeight: 700,
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 16,
-    letterSpacing: 1,
-  },
-  title: {
-    fontSize: 22,
-    fontWeight: 700,
-    color: '#0F2744',
-    margin: 0,
+  logo: {
+    width: '100%',
+    maxWidth: 260,
+    height: 'auto',
+    display: 'block',
+    margin: '0 auto 14px',
   },
   subtitle: {
     fontSize: 13,
     color: '#8B94A6',
-    margin: '6px 0 0',
+    margin: 0,
     fontWeight: 400,
+    letterSpacing: 0.2,
   },
   form: {
     display: 'flex',
@@ -134,9 +139,13 @@ const styles = {
     border: '1px solid #DDE2E8',
     fontSize: 14,
     outline: 'none',
-    transition: 'border-color 0.2s',
+    transition: 'border-color 0.2s, box-shadow 0.2s',
     marginTop: 4,
     fontFamily: 'inherit',
+  },
+  inputFocused: {
+    borderColor: '#0F2744',
+    boxShadow: '0 0 0 3px rgba(15, 39, 68, 0.08)',
   },
   button: {
     marginTop: 20,
@@ -159,16 +168,5 @@ const styles = {
     borderRadius: 8,
     fontSize: 13,
     fontWeight: 500,
-  },
-  footer: {
-    marginTop: 24,
-    textAlign: 'center',
-    borderTop: '1px solid #F0F2F5',
-    paddingTop: 16,
-  },
-  footerText: {
-    fontSize: 12,
-    color: '#A0A8B6',
-    margin: '4px 0',
   },
 };

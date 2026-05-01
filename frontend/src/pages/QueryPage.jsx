@@ -13,17 +13,16 @@ export default function QueryPage() {
   const { user } = useAuth();
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [loadingElapsed, setLoadingElapsed] = useState(0);
   const [expandedSql, setExpandedSql] = useState({});
-  const [exporting, setExporting] = useState({}); // Track which message is exporting
+  const [exporting, setExporting] = useState({});
   const chatEndRef = useRef(null);
 
-  // Database & table state
   const [databases, setDatabases] = useState([]);
   const [categories, setCategories] = useState([]);
   const [selectedDb, setSelectedDb] = useState(() => sessionStorage.getItem(DB_KEY) || '');
   const [selectedCategory, setSelectedCategory] = useState(() => sessionStorage.getItem(CATEGORY_KEY) || '');
 
-  // Chat messages
   const [messages, setMessages] = useState(() => {
     try {
       const saved = sessionStorage.getItem(STORAGE_KEY);
@@ -31,12 +30,10 @@ export default function QueryPage() {
     } catch { return []; }
   });
 
-  // Save messages
   useEffect(() => {
     try { sessionStorage.setItem(STORAGE_KEY, JSON.stringify(messages)); } catch {}
   }, [messages]);
 
-  // Fetch databases on mount
   useEffect(() => {
     queryAPI.databases().then((res) => {
       setDatabases(res.data.databases);
@@ -50,7 +47,6 @@ export default function QueryPage() {
     });
   }, []);
 
-  // Fetch categories when database changes
   useEffect(() => {
     if (!selectedDb) return;
     queryAPI.categories(selectedDb).then((res) => {
@@ -63,12 +59,31 @@ export default function QueryPage() {
     }).catch(() => setCategories([]));
   }, [selectedDb]);
 
-  // Auto-scroll
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, loading]);
 
-  // Dynamic suggestions based on selected database
+  // Timer for loading state
+  useEffect(() => {
+    if (!loading) {
+      setLoadingElapsed(0);
+      return;
+    }
+    const start = Date.now();
+    const interval = setInterval(() => {
+      setLoadingElapsed(Math.floor((Date.now() - start) / 1000));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [loading]);
+
+  const getLoadingStage = (elapsed) => {
+    if (elapsed < 5) return 'Analyzing your question';
+    if (elapsed < 30) return 'Generating...';
+    if (elapsed < 90) return 'Still working -';
+    if (elapsed < 120) return 'Few more seconds...';
+    return 'Almost there, finalizing query';
+  };
+
   const getSuggestions = () => {
     if (selectedDb === 'anandrathi_trading') {
       return [
@@ -83,14 +98,14 @@ export default function QueryPage() {
       ];
     }
     return [
-      'How many communications were sent',
-      'Show status distribution',
-      'How many errors per application',
-      'Which application has the most failures',
-      'Top 10 recipients by message volume',
-      'How many SMS vs EMAIL were sent',
-      'Show recent errors',
-      'How many communications failed this week',
+      'Show status counts from communications',
+      'Count messages grouped by status and service type',
+      'How many EMAIL messages have status BOUNCE',
+      'Count of errors grouped by error summary',
+      'What are the total errors per application name',
+      'Show service type counts for each application',
+      'Count errors grouped by application name and service type',
+      'How many duplicate communications were there',
     ];
   };
 
@@ -100,7 +115,7 @@ export default function QueryPage() {
     sessionStorage.setItem(DB_KEY, newDb);
     setMessages([]);
     sessionStorage.removeItem(STORAGE_KEY);
-    sessionStorage.removeItem(CATEGORY_KEY);  // was TABLE_KEY
+    sessionStorage.removeItem(CATEGORY_KEY);
   };
 
   const handleCategoryChange = (e) => {
@@ -160,18 +175,34 @@ export default function QueryPage() {
     }
   };
 
-  const currentDbLabel = databases.find(d => d.database === selectedDb)?.label || selectedDb; 
+  const currentDbLabel = databases.find(d => d.database === selectedDb)?.label || selectedDb;
+  const progressPercent = Math.min((loadingElapsed / 90) * 100, 95);
 
   return (
     <div style={s.container}>
-      {/* Header */}
+      <style>{`
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.5; }
+        }
+        .pulse-dot {
+          animation: pulse 1.4s ease-in-out infinite;
+        }
+        .spin {
+          animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+      `}</style>
+
       <div style={s.header}>
         <h1 style={s.title}>Query Engine</h1>
         <div style={s.badge}>
           {user?.role_name === 'Admin' ? 'Full access' : 'Filtered by role'}
         </div>
 
-        {/* Database Selector */}
         {databases.length > 1 && (
           <div style={s.selector}>
             <Server size={14} color="#5A6577" />
@@ -184,7 +215,6 @@ export default function QueryPage() {
           </div>
         )}
 
-        {/* Category Selector */}
         {categories.length > 0 && (
           <div style={s.selector}>
             <Database size={14} color="#5A6577" />
@@ -204,24 +234,22 @@ export default function QueryPage() {
         )}
       </div>
 
-      {/* Context banner */}
-{selectedCategory && (
-  <div style={s.contextBanner}>
-    <Server size={14} />
-    <span>
-      Querying: <strong>{currentDbLabel}</strong> → <strong>{selectedCategory}</strong>
-    </span>
-  </div>
-)}
+      {selectedCategory && (
+        <div style={s.contextBanner}>
+          <Server size={14} />
+          <span>
+            Querying: <strong>{currentDbLabel}</strong> → <strong>{selectedCategory}</strong>
+          </span>
+        </div>
+      )}
 
-      {/* Chat Area */}
       <div style={s.chatArea}>
         {messages.length === 0 && (
           <div style={s.emptyState}>
             <Database size={40} color="#D0D5DD" />
             <h3 style={s.emptyTitle}>Ask your data anything</h3>
             <p style={s.emptyText}>
-              Type a question in natural language and the AI will generate SQL and fetch results.
+              Type a question in plain English. The AI generates SQL and fetches results from your database. Multi-table queries take ~90 seconds on CPU.
             </p>
             <div style={s.suggestGrid}>
               {getSuggestions().map((sg) => (
@@ -290,8 +318,8 @@ export default function QueryPage() {
                   {msg.content.data && msg.content.data.length > 0 && (() => {
                     const chart = detectChart(msg.content.columns, msg.content.data);
                     return chart ? (
-                    <QueryChart type={chart.type} config={chart.config} data={msg.content.data} />
-                  ) : null;
+                      <QueryChart type={chart.type} config={chart.config} data={msg.content.data} />
+                    ) : null;
                   })()}
                   {msg.content.generated_sql && msg.content.data && msg.content.data.length > 0 && (
                     <button
@@ -315,15 +343,25 @@ export default function QueryPage() {
 
         {loading && (
           <div style={s.msgRow}>
-            <div style={s.aiBubble}>
-              <div style={s.loadingDots}><Loader size={16} className="spin" /> Generating query...</div>
+            <div style={s.aiBubbleLoading}>
+              <div style={s.loadingHeader}>
+                <div style={s.dotsWrap}>
+                  <span className="pulse-dot" style={{ ...s.dot, animationDelay: '0s' }} />
+                  <span className="pulse-dot" style={{ ...s.dot, animationDelay: '0.2s' }} />
+                  <span className="pulse-dot" style={{ ...s.dot, animationDelay: '0.4s' }} />
+                </div>
+                <span style={s.loadingStage}>{getLoadingStage(loadingElapsed)}</span>
+                <span style={s.loadingTimer}>{loadingElapsed}s / ~90s</span>
+              </div>
+              <div style={s.progressBar}>
+                <div style={{ ...s.progressFill, width: `${progressPercent}%` }} />
+              </div>
             </div>
           </div>
         )}
         <div ref={chatEndRef} />
       </div>
 
-      {/* Input */}
       <div style={s.inputBar}>
         <input
           style={s.input}
@@ -353,16 +391,23 @@ const s = {
   chatArea: { flex: 1, overflowY: 'auto', paddingBottom: 16 },
   emptyState: { textAlign: 'center', padding: '60px 20px' },
   emptyTitle: { fontSize: 18, fontWeight: 600, color: '#0F2744', margin: '16px 0 6px' },
-  emptyText: { fontSize: 14, color: '#8B94A6', margin: '0 0 24px', maxWidth: 400, marginInline: 'auto' },
-  suggestGrid: { display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', maxWidth: 600, margin: '0 auto' },
+  emptyText: { fontSize: 14, color: '#8B94A6', margin: '0 0 24px', maxWidth: 480, marginInline: 'auto', lineHeight: 1.5 },
+  suggestGrid: { display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', maxWidth: 700, margin: '0 auto' },
   suggestBtn: { padding: '8px 16px', borderRadius: 20, border: '1px solid #E8ECF0', background: '#FFF', fontSize: 13, color: '#4A5568', cursor: 'pointer', fontFamily: 'inherit', transition: 'all 0.15s' },
   msgRow: { display: 'flex', marginBottom: 12 },
   userBubble: { maxWidth: '70%', background: '#0F2744', color: '#FFF', padding: '12px 16px', borderRadius: '16px 16px 4px 16px' },
   aiBubble: { maxWidth: '85%', background: '#FFF', border: '1px solid #E8ECF0', padding: '14px 18px', borderRadius: '16px 16px 16px 4px' },
+  aiBubbleLoading: { minWidth: 320, background: '#FFF', border: '1px solid #E8ECF0', padding: '14px 18px', borderRadius: '16px 16px 16px 4px' },
+  loadingHeader: { display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10 },
+  dotsWrap: { display: 'flex', gap: 4 },
+  dot: { width: 6, height: 6, borderRadius: '50%', background: '#1A6DDB', display: 'inline-block' },
+  loadingStage: { fontSize: 13, color: '#0F2744', fontWeight: 500, flex: 1 },
+  loadingTimer: { fontSize: 11, color: '#8B94A6', fontFamily: "'JetBrains Mono', monospace" },
+  progressBar: { height: 4, background: '#F0F2F5', borderRadius: 2, overflow: 'hidden' },
+  progressFill: { height: '100%', background: 'linear-gradient(90deg, #1A6DDB, #0F2744)', transition: 'width 1s linear', borderRadius: 2 },
   msgText: { margin: 0, fontSize: 14, lineHeight: 1.6 },
   errorBox: { display: 'flex', alignItems: 'flex-start', gap: 8, color: '#D4620A', background: '#FEF0E4', padding: '10px 14px', borderRadius: 8, fontSize: 13 },
   sqlBox: { background: '#1E1E2E', borderRadius: 8, overflow: 'hidden', marginBottom: 10 },
-  sqlHeader: { display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px', background: '#2A2A3E', color: '#8B94A6', fontSize: 11, fontWeight: 500 },
   sqlToggle: { display: 'flex', alignItems: 'center', gap: 6, width: '100%', padding: '8px 12px', background: '#2A2A3E', color: '#8B94A6', fontSize: 11, fontWeight: 500, border: 'none', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' },
   methodBadge: { marginLeft: 'auto', padding: '2px 8px', borderRadius: 4, background: '#0D7C4A33', color: '#0D7C4A', fontSize: 10, fontWeight: 600 },
   sqlCode: { padding: '10px 14px', margin: 0, color: '#CDD6F4', fontSize: 12, fontFamily: "'JetBrains Mono', monospace", whiteSpace: 'pre-wrap', wordBreak: 'break-all' },
@@ -372,11 +417,9 @@ const s = {
   table: { width: '100%', borderCollapse: 'collapse', fontSize: 12 },
   th: { padding: '8px 10px', textAlign: 'left', fontWeight: 600, color: '#5A6577', background: '#F8FAFB', borderBottom: '1px solid #E8ECF0', position: 'sticky', top: 0, fontSize: 11 },
   td: { padding: '7px 10px', borderBottom: '1px solid #F0F2F5', color: '#2D3748' },
-  moreRows: { textAlign: 'center', fontSize: 12, color: '#8B94A6', padding: 8, margin: 0 },
   truncateBanner: { fontSize: 12, color: '#2D5A87', background: '#EAF2FA', border: '1px solid #B8D4EC', padding: '8px 12px', borderRadius: 6, marginBottom: 10 },
   exportBtn: { display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 14px', borderRadius: 6, border: '1px solid #E8ECF0', background: '#FFF', fontSize: 12, fontWeight: 500, color: '#4A5568', cursor: 'pointer', fontFamily: 'inherit' },
   timestamp: { display: 'block', fontSize: 10, color: '#A0A8B6', marginTop: 6 },
-  loadingDots: { display: 'flex', alignItems: 'center', gap: 8, color: '#8B94A6', fontSize: 13 },
   inputBar: { display: 'flex', gap: 10, padding: '16px 0 0', borderTop: '1px solid #E8ECF0' },
   input: { flex: 1, padding: '12px 16px', borderRadius: 10, border: '1px solid #DDE2E8', fontSize: 14, outline: 'none', fontFamily: 'inherit', transition: 'border-color 0.2s' },
   sendBtn: { width: 44, height: 44, borderRadius: 10, border: 'none', background: '#0F2744', color: '#FFF', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0, transition: 'opacity 0.15s' },

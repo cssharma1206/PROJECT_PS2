@@ -1,6 +1,7 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { LayoutDashboard, MessageSquare, Shield, LogOut, User } from 'lucide-react';
+import logoUrl from '../assets/logo_tar.jpg';
 
 export default function Layout() {
   const { user, logout } = useAuth();
@@ -25,11 +26,7 @@ export default function Layout() {
       {/* Sidebar */}
       <aside style={styles.sidebar}>
         <div style={styles.brand}>
-          <div style={styles.brandIcon}>AR</div>
-          <div>
-            <div style={styles.brandTitle}>Anand Rathi</div>
-            <div style={styles.brandSub}>Intelligence Platform</div>
-          </div>
+          <img src={logoUrl} alt="Tech Anand Rathi" style={styles.brandLogo} />
         </div>
 
         <nav style={styles.nav}>
@@ -96,34 +93,16 @@ const styles = {
   brand: {
     display: 'flex',
     alignItems: 'center',
-    gap: 12,
-    padding: '0 8px 24px',
+    justifyContent: 'center',
+    padding: '0 4px 20px',
     borderBottom: '1px solid #F0F2F5',
     marginBottom: 24,
   },
-  brandIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 10,
-    background: '#0F2744',
-    color: '#FFF',
-    fontSize: 15,
-    fontWeight: 700,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    letterSpacing: 1,
-    flexShrink: 0,
-  },
-  brandTitle: {
-    fontSize: 15,
-    fontWeight: 700,
-    color: '#0F2744',
-  },
-  brandSub: {
-    fontSize: 11,
-    color: '#8B94A6',
-    fontWeight: 400,
+  brandLogo: {
+    width: '100%',
+    maxWidth: 200,
+    height: 'auto',
+    display: 'block',
   },
   nav: {
     display: 'flex',
