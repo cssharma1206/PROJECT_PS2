@@ -125,20 +125,36 @@ def inject_access_into_sql(sql: str, user: dict) -> tuple:
     found_table = None
     found_alias = None
 
+    # SQL keywords that can appear after a table name but are NOT aliases.
+    # Without this guard, "FROM CommunicationMaster GROUP BY ..." would
+    # incorrectly capture "GROUP" as the table's alias, producing invalid
+    # SQL like "GROUP.ApplicationId IN (1)".
+    SQL_KEYWORDS_AFTER_TABLE = (
+        r"WHERE|GROUP|ORDER|HAVING|LIMIT|UNION|INNER|LEFT|RIGHT|"
+        r"FULL|CROSS|JOIN|ON|AS"
+    )
+ 
     for table, col in ACCESS_RELEVANT_TABLES.items():
-        # Regex: (FROM|JOIN)\s+TableName\s+(alias)?  — alias is optional
-        pattern = rf"\b(?:FROM|JOIN)\s+{re.escape(table)}\s+(\w+)"
+        # Pattern 1: real alias — table followed by a word that is NOT a SQL keyword.
+        # Uses (?!keyword\b) negative lookahead to skip keywords.
+        pattern = (
+            rf"\b(?:FROM|JOIN)\s+{re.escape(table)}\s+"
+            rf"(?!(?:{SQL_KEYWORDS_AFTER_TABLE})\b)"
+            rf"(\w+)"
+        )
         m = re.search(pattern, sql, re.IGNORECASE)
         if m:
             found_table = table
             found_alias = m.group(1)
             break
-        # Try without alias: FROM TableName (end or followed by keyword)
-        pattern_noalias = rf"\b(?:FROM|JOIN)\s+{re.escape(table)}\b(?!\s+\w)"
+        # Pattern 2: no alias — table followed by end-of-string OR a SQL keyword.
+        # This branch handles "FROM CommunicationMaster GROUP BY ..."
+        # by NOT capturing GROUP, then prefixing columns with the full table name.
+        pattern_noalias = rf"\b(?:FROM|JOIN)\s+{re.escape(table)}\b"
         m2 = re.search(pattern_noalias, sql, re.IGNORECASE)
         if m2:
             found_table = table
-            found_alias = table  # use full table name as alias prefix
+            found_alias = table  # use full table name as the qualifier
             break
 
     if not found_table:
